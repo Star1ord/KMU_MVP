@@ -1,0 +1,370 @@
+"""
+CV+Audio inference (video -> MFCC + VGG16 -> ONNX DNN).
+
+Based on the training notebook `cv_audio_test/audio_cv_1to1.py`:
+- audio features: MFCC (typically 13 dims)
+- video features: VGG16 fc1+fc2 (8192 dims) averaged over frames
+- input order during training: [audio, video]
+"""
+
+from __future__ import annotations
+
+import math
+import os
+import subprocess
+import tempfile
+from pathlib import Path
+from typing import Any, Dict, Optional, Tuple
+
+import numpy as np
+
+
+_ONNX_SESSION = None
+_ONNX_SESSION_PATH: Optional[str] = None
+
+_VGG_MODELS: Dict[str, Any] = {}
+_HAAR_CASCADE = None
+
+
+def _find_onnx_model_path(model_path: Optional[str] = None) -> str:
+    if model_path:
+        p = Path(model_path)
+        if not p.exists():
+            raise FileNotFoundError(f"CV+Audio ONNX model not found: {p}")
+        return str(p)
+
+    candidates = [
+        Path("models/cv_audio/DNN_model.onnx"),
+        Path("models/cv_audio/dnn_model.onnx"),
+        Path("cv_audio_test/DNN_model.onnx"),
+        Path("cv_audio_test/dnn_model.onnx"),
+    ]
+    for c in candidates:
+        if c.exists():
+            return str(c)
+    raise FileNotFoundError(
+        "CV+Audio ONNX model not found. Put it in `models/cv_audio/DNN_model.onnx` "
+        f"or provide explicit model_path. Checked: {[str(c) for c in candidates]}"
+    )
+
+
+def _get_onnx_session(model_path: str):
+    global _ONNX_SESSION, _ONNX_SESSION_PATH
+    if _ONNX_SESSION is not None and _ONNX_SESSION_PATH == model_path:
+        return _ONNX_SESSION
+
+    try:
+        import onnxruntime as ort
+    except Exception as e:
+        raise ImportError(
+            "onnxruntime is required for CV+Audio ONNX inference. "
+            "Install: pip install onnxruntime"
+        ) from e
+
+    # Prefer CPU to keep deployment simple
+    sess = ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
+    _ONNX_SESSION = sess
+    _ONNX_SESSION_PATH = model_path
+    return sess
+
+
+def _ensure_haar():
+    global _HAAR_CASCADE
+    if _HAAR_CASCADE is not None:
+        return _HAAR_CASCADE
+
+    import cv2
+
+    haar_path = Path(cv2.data.haarcascades) / "haarcascade_frontalface_default.xml"
+    cascade = cv2.CascadeClassifier(str(haar_path))
+    if cascade.empty():
+        raise RuntimeError(f"Failed to load Haar cascade: {haar_path}")
+    _HAAR_CASCADE = cascade
+    return cascade
+
+
+def _extract_audio_mfcc(
+    video_path: str,
+    sr: int = 16000,
+    n_mfcc: int = 13,
+) -> np.ndarray:
+    """
+    Extract MFCC mean vector from video's audio track.
+    Returns shape: (n_mfcc,).
+    """
+    try:
+        import librosa
+    except Exception as e:
+        raise ImportError(
+            "librosa is required for MFCC extraction. Install: pip install librosa soundfile"
+        ) from e
+
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+        wav_path = tmp.name
+
+    try:
+        # Convert to mono wav @ sr
+        cmd = [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            str(video_path),
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            str(sr),
+            wav_path,
+        ]
+        subprocess.run(cmd, check=True)
+
+        y, _sr = librosa.load(wav_path, sr=sr, mono=True)
+        if y is None or len(y) == 0:
+            raise ValueError("empty audio after ffmpeg extraction")
+
+        mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=n_mfcc)
+        if mfcc.size == 0:
+            raise ValueError("mfcc extraction produced empty output")
+
+        return mfcc.mean(axis=1).astype(np.float32)
+    finally:
+        try:
+            os.unlink(wav_path)
+        except Exception:
+            pass
+
+
+def _get_vgg16_fc_models():
+    """
+    Load VGG16 and expose fc1 + fc2 layers as feature extractors.
+    Cached globally to avoid re-loading per request.
+    """
+    if "fc1" in _VGG_MODELS and "fc2" in _VGG_MODELS:
+        return _VGG_MODELS["fc1"], _VGG_MODELS["fc2"]
+
+    try:
+        from tensorflow.keras.applications import VGG16
+        from tensorflow.keras.models import Model
+    except Exception as e:
+        raise ImportError(
+            "TensorFlow/Keras is required for VGG16 feature extraction. "
+            "Install a compatible TensorFlow build for your Python version."
+        ) from e
+
+    base = VGG16(weights="imagenet", include_top=True)
+    fc1 = Model(inputs=base.input, outputs=base.get_layer("fc1").output)
+    fc2 = Model(inputs=base.input, outputs=base.get_layer("fc2").output)
+    _VGG_MODELS["fc1"] = fc1
+    _VGG_MODELS["fc2"] = fc2
+    return fc1, fc2
+
+
+def _detect_face_bbox_bgr(frame_bgr: np.ndarray) -> Optional[Tuple[int, int, int, int]]:
+    """
+    Return (x1, y1, x2, y2) for the first detected face.
+    Uses RetinaFace if installed; otherwise Haar cascade.
+    """
+    # 1) RetinaFace if available
+    try:
+        from retinaface import RetinaFace  # type: ignore
+
+        detected = RetinaFace.detect_faces(frame_bgr)
+        if isinstance(detected, dict) and detected:
+            first_key = next(iter(detected.keys()))
+            x1, y1, x2, y2 = map(int, detected[first_key]["facial_area"])
+            return x1, y1, x2, y2
+    except Exception:
+        pass
+
+    # 2) Haar fallback
+    import cv2
+
+    cascade = _ensure_haar()
+    gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+    faces = cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(60, 60))
+    if len(faces) == 0:
+        return None
+    x, y, w, h = faces[0]
+    return int(x), int(y), int(x + w), int(y + h)
+
+
+def _extract_video_vgg_features(
+    video_path: str,
+    sample_rate_fps: float = 1.0,
+    max_frames: int = 120,
+) -> np.ndarray:
+    """
+    Extract mean VGG16 (fc1+fc2) feature vector from sampled face crops in the video.
+    Returns shape: (8192,).
+    """
+    import cv2
+    from tensorflow.keras.applications.vgg16 import preprocess_input
+
+    fc1, fc2 = _get_vgg16_fc_models()
+
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise RuntimeError(f"could not open video: {video_path}")
+
+    fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+    interval = max(1, int(math.floor(fps / max(sample_rate_fps, 1e-6))))
+
+    feats = []
+    frame_idx = 0
+    processed = 0
+
+    try:
+        while processed < max_frames:
+            ok, frame = cap.read()
+            if not ok:
+                break
+
+            if frame_idx % interval == 0:
+                bbox = _detect_face_bbox_bgr(frame)
+                if bbox is not None:
+                    x1, y1, x2, y2 = bbox
+                    x1 = max(0, x1)
+                    y1 = max(0, y1)
+                    x2 = min(frame.shape[1], x2)
+                    y2 = min(frame.shape[0], y2)
+                    crop = frame[y1:y2, x1:x2]
+
+                    if crop.size > 0 and crop.shape[0] >= 50 and crop.shape[1] >= 50:
+                        rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+                        rgb = cv2.resize(rgb, (224, 224), interpolation=cv2.INTER_LINEAR)
+                        x = np.expand_dims(rgb.astype(np.float32), axis=0)
+                        x = preprocess_input(x)
+
+                        f1 = fc1.predict(x, verbose=0)
+                        f2 = fc2.predict(x, verbose=0)
+                        f = np.concatenate([f1, f2], axis=1).reshape(-1)
+                        feats.append(f.astype(np.float32))
+                        processed += 1
+
+            frame_idx += 1
+    finally:
+        cap.release()
+
+    if not feats:
+        raise ValueError("no face features extracted (no faces detected or all crops invalid)")
+
+    return np.mean(np.stack(feats, axis=0), axis=0).astype(np.float32)
+
+
+def _sigmoid(x: np.ndarray) -> np.ndarray:
+    return 1.0 / (1.0 + np.exp(-x))
+
+
+def _softmax(x: np.ndarray, axis: int = -1) -> np.ndarray:
+    x = x - np.max(x, axis=axis, keepdims=True)
+    e = np.exp(x)
+    return e / np.sum(e, axis=axis, keepdims=True)
+
+
+def _onnx_predict_proba(session, x_vec: np.ndarray) -> float:
+    """
+    Return probability of class=1.
+    Handles common ONNX output formats:
+    - logits shape (1,2)
+    - proba shape (1,2)
+    - score shape (1,1) (logit or probability)
+    """
+    inp = session.get_inputs()[0]
+    inp_name = inp.name
+
+    x = x_vec.astype(np.float32).reshape(1, -1)
+    outputs = session.run(None, {inp_name: x})
+    if not outputs:
+        raise RuntimeError("ONNX session returned no outputs")
+
+    out = outputs[0]
+    out = np.array(out)
+
+    # (1,2) -> assume logits or probabilities
+    if out.ndim == 2 and out.shape[1] == 2:
+        # If values look like probabilities already (sum close to 1), take second column
+        row_sum = float(out[0].sum())
+        if 0.98 <= row_sum <= 1.02 and np.all(out[0] >= 0) and np.all(out[0] <= 1):
+            return float(out[0, 1])
+        probs = _softmax(out, axis=1)
+        return float(probs[0, 1])
+
+    # (1,1) -> sigmoid if outside [0,1]
+    if out.ndim == 2 and out.shape[1] == 1:
+        v = float(out[0, 0])
+        if 0.0 <= v <= 1.0:
+            return v
+        return float(_sigmoid(np.array([v], dtype=np.float32))[0])
+
+    # (1,) -> treat similarly
+    if out.ndim == 1 and out.shape[0] == 1:
+        v = float(out[0])
+        if 0.0 <= v <= 1.0:
+            return v
+        return float(_sigmoid(np.array([v], dtype=np.float32))[0])
+
+    raise ValueError(f"Unsupported ONNX output shape: {out.shape}")
+
+
+def predict_cv_audio(
+    video_path: str,
+    model_path: Optional[str] = None,
+    threshold: float = 0.5,
+    sample_rate: float = 1.0,
+    n_mfcc: int = 13,
+) -> Dict[str, Any]:
+    """
+    End-to-end CV+Audio prediction for a single video file.
+
+    Returns:
+      {success, probability, prediction, prediction_label, risk_level, error}
+    """
+    result: Dict[str, Any] = {
+        "success": False,
+        "probability": None,
+        "prediction": None,
+        "prediction_label": None,
+        "risk_level": None,
+        "error": None,
+    }
+
+    try:
+        onnx_path = _find_onnx_model_path(model_path)
+        sess = _get_onnx_session(onnx_path)
+
+        audio_feat = _extract_audio_mfcc(video_path, n_mfcc=n_mfcc)  # (n_mfcc,)
+        video_feat = _extract_video_vgg_features(video_path, sample_rate_fps=sample_rate)  # (8192,)
+
+        x_vec = np.concatenate([audio_feat, video_feat], axis=0).astype(np.float32)
+
+        # Validate input dimensionality if ONNX specifies it
+        try:
+            expected = sess.get_inputs()[0].shape
+            if isinstance(expected, (list, tuple)) and len(expected) == 2:
+                expected_dim = expected[1]
+                if isinstance(expected_dim, int) and expected_dim > 0 and x_vec.shape[0] != expected_dim:
+                    raise ValueError(
+                        f"ONNX model expects {expected_dim} features, but got {x_vec.shape[0]} "
+                        f"(audio={audio_feat.shape[0]}, video={video_feat.shape[0]})."
+                    )
+        except Exception:
+            # If shape is dynamic/unknown, skip strict check
+            pass
+
+        prob = _onnx_predict_proba(sess, x_vec)
+        pred = 1 if prob >= float(threshold) else 0
+
+        result["success"] = True
+        result["probability"] = float(prob)
+        result["prediction"] = int(pred)
+        result["prediction_label"] = "experimental" if pred == 1 else "control"
+        result["risk_level"] = "high" if prob >= 0.7 else "medium" if prob >= 0.4 else "low"
+        return result
+
+    except Exception as e:
+        result["error"] = str(e)
+        return result
+

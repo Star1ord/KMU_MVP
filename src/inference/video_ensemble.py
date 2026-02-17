@@ -12,6 +12,7 @@ from typing import Dict, Optional, Tuple
 import pandas as pd
 import numpy as np
 import joblib
+import numpy as np
 
 # Добавляем путь к video_integration (legacy support)
 VIDEO_INTEGRATION_DIR = Path(__file__).parent.parent.parent / 'video_integration'
@@ -56,14 +57,114 @@ except Exception as e:
                             break
                 if (mpath is None) or (not mpath.exists()):
                     raise FileNotFoundError(f"Video model not found, checked: {possible_paths}")
-                self.model = joblib.load(mpath)
+
+                raw_model = joblib.load(mpath)
+
+                # Спец-кейс: XGBoost модель, сохранённая как "сырой" dict с model_bytes.
+                # Ожидаем структуру:
+                # {
+                #   "model_bytes": <bytes>,
+                #   "feature_columns": [...],
+                #   "params": {...},
+                #   "best_round": int,
+                # }
+                if isinstance(raw_model, dict) and "model_bytes" in raw_model and "feature_columns" in raw_model:
+                    try:
+                        import xgboost as xgb
+                    except Exception as e:
+                        raise ImportError(
+                            "Video model is an XGBoost snapshot (model_bytes), "
+                            "but xgboost is not installed. "
+                            "Install it, for example: pip install xgboost==3.1.2"
+                        ) from e
+
+                    model_bytes = raw_model["model_bytes"]
+                    feature_columns = raw_model["feature_columns"]
+
+                    if not isinstance(feature_columns, (list, tuple)) or not feature_columns:
+                        raise ValueError(
+                            f"Invalid feature_columns in video model: {feature_columns!r}"
+                        )
+
+                    booster = xgb.Booster()
+                    # load_model в XGBoost 3.x умеет принимать bytes/bytearray
+                    booster.load_model(bytearray(model_bytes))
+
+                    class _XGBBinaryWrapper:
+                        def __init__(self, booster, feature_cols):
+                            self.booster = booster
+                            self.feature_cols = list(feature_cols)
+
+                        def predict_proba(self, X):
+                            # X: numpy array shape (n_samples, n_features)
+                            import xgboost as _xgb
+                            dmat = _xgb.DMatrix(X, feature_names=self.feature_cols)
+                            probs = self.booster.predict(dmat).reshape(-1, 1)
+                            # Возвращаем как в sklearn: [P(class=0), P(class=1)]
+                            probs = np.clip(probs, 1e-7, 1 - 1e-7)
+                            return np.hstack([1.0 - probs, probs])
+
+                    self.model = _XGBBinaryWrapper(booster, feature_columns)
+
+                else:
+                    # Общий случай: разворачиваем вложенные dict до estimator'а с predict_proba.
+                    def _unwrap_model(obj, max_depth: int = 5):
+                        current = obj
+                        for _ in range(max_depth):
+                            # Если это уже estimator с predict_proba — используем его
+                            if hasattr(current, "predict_proba"):
+                                return current
+                            # Если это dict — пытаемся найти внутри модель
+                            if isinstance(current, dict):
+                                # 1) Прямой ключ 'model'
+                                if "model" in current:
+                                    current = current["model"]
+                                    continue
+                                # 2) Ищем первое значение с predict_proba или вложенный dict
+                                next_candidate = None
+                                for v in current.values():
+                                    if hasattr(v, "predict_proba"):
+                                        next_candidate = v
+                                        break
+                                    if isinstance(v, dict):
+                                        next_candidate = v
+                                if next_candidate is None:
+                                    break
+                                current = next_candidate
+                                continue
+                            # Не dict и без predict_proba — дальше разворачивать нечего
+                            break
+                        return current
+
+                    self.model = _unwrap_model(raw_model)
+
+                if not hasattr(self.model, "predict_proba"):
+                    # Отдадим максимум отладочной инфы один раз, чтобы не гонять пайплайн снова
+                    raise TypeError(
+                        f"Loaded video model object has no predict_proba: "
+                        f"type={type(self.model)}, "
+                        f"raw_type={type(raw_model)}, "
+                        f"raw_keys={list(raw_model.keys()) if isinstance(raw_model, dict) else 'n/a'}"
+                    )
+
                 self.threshold = threshold
 
             def predict_from_csv(self, df: pd.DataFrame):
-                num_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-                if not num_cols:
-                    raise ValueError("No numeric features in video CSV")
-                X = df[num_cols].mean(axis=0).values.reshape(1, -1)
+                # If model wrapper provides expected feature order, use it.
+                if hasattr(self.model, "feature_cols") and getattr(self.model, "feature_cols"):
+                    expected_cols = list(getattr(self.model, "feature_cols"))
+                    missing = [c for c in expected_cols if c not in df.columns]
+                    if missing:
+                        raise ValueError(
+                            f"Missing required feature columns: {missing}. "
+                            f"Available numeric columns: {df.select_dtypes(include=[np.number]).columns.tolist()}"
+                        )
+                    X = df[expected_cols].mean(axis=0).values.reshape(1, -1)
+                else:
+                    num_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+                    if not num_cols:
+                        raise ValueError("No numeric features in video CSV")
+                    X = df[num_cols].mean(axis=0).values.reshape(1, -1)
                 prob = float(self.model.predict_proba(X)[0, 1])
                 pred = 1 if prob >= self.threshold else 0
                 return prob, pred

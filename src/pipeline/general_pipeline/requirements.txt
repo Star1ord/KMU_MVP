@@ -1,7 +1,11 @@
-# Зависимости для пайплайна обработки мультимодальных данных речи
+# Зависимости для пайплайна обработки мультимодальных данных речи (Python 3.11)
 
 # Обработка аудио и видео
 pydub>=0.25.1
+opencv-python>=4.7.0
+# Используем старую ветку mediapipe с поддержкой mp.solutions,
+# т.к. текущий CV-код (RealtimeAnalyzer) завязан именно на этот API.
+mediapipe==0.10.21
 
 # Транскрипция
 whisperx>=3.1.1
@@ -16,5 +20,7 @@ numpy>=1.24.0
 tqdm>=4.65.0
 psutil>=5.9.0
 
-
-opencv-python mediapipe
+uvicorn
+fastapi
+python-multipart
+xgboost=3.1.2

@@ -168,6 +168,7 @@ def analyze_new_media_file(
         
         # Инициализируем переменные для видео обработки
         video_result = None
+        cv_audio_result = None
         ensemble_result = None
         
         # Обработка видео (независимо от успешности аудио+NLP пайплайна)
@@ -182,6 +183,14 @@ def analyze_new_media_file(
         except Exception as e:
             VIDEO_ENSEMBLE_AVAILABLE = False
             VIDEO_IMPORT_ERROR = str(e)
+        
+        # Try to import CV+Audio pipeline
+        try:
+            from src.pipeline.cv_audio_pipeline import predict_cv_audio as predict_cv_audio_func
+            CV_AUDIO_AVAILABLE = True
+        except Exception as e:
+            CV_AUDIO_AVAILABLE = False
+            CV_AUDIO_IMPORT_ERROR = str(e)
 
         if VIDEO_ENSEMBLE_AVAILABLE:
             media_ext = media_file.suffix.lower()
@@ -224,6 +233,33 @@ def analyze_new_media_file(
                     print(f"Error in video processing: {video_e}")
                     import traceback
                     traceback.print_exc()
+        
+        # CV+Audio processing (if available and video file)
+        if CV_AUDIO_AVAILABLE and is_video:
+            print(f"\n{'='*80}")
+            print("CV+AUDIO PROCESSING")
+            print(f"{'='*80}")
+            
+            try:
+                cv_audio_pred_result = predict_cv_audio_func(
+                    video_path=str(media_file),
+                    model_path=None,
+                    threshold=0.5,
+                    sample_rate=1.0,
+                )
+                
+                if cv_audio_pred_result.get('success'):
+                    cv_audio_result = cv_audio_pred_result
+                    print(f"\n[CV+Audio Model Prediction]")
+                    print(f"  CV+Audio score: {cv_audio_result['probability']:.3f}")
+                    print(f"  Prediction: {'RISK' if cv_audio_result['prediction'] == 1 else 'CONTROL'}")
+                    print(f"  Risk level: {cv_audio_result['risk_level']}")
+                else:
+                    print(f"CV+Audio prediction failed: {cv_audio_pred_result.get('error', 'Unknown error')}")
+            except Exception as cv_audio_e:
+                print(f"Error in CV+Audio processing: {cv_audio_e}")
+                import traceback
+                traceback.print_exc()
         
         # Load features for this session
         df = pd.read_csv(merged_features_path, low_memory=False)
@@ -431,25 +467,78 @@ def analyze_new_media_file(
             result['risk_level'] = 'high' if p_final >= 0.6 else 'medium' if p_final >= 0.3 else 'low'
             
             # Если видео уже обработано ранее, создаем ансамблевое предсказание
-            if video_result and video_result['success']:
-                audio_nlp_result = {
-                    'risk_score': result['risk_score'],
+            # Собираем все доступные результаты моделей
+            available_results = []
+            
+            # Audio+NLP результат (основной)
+            if result.get('success') and result.get('risk_score') is not None:
+                available_results.append({
+                    'name': 'audio_nlp',
+                    'score': result['risk_score'],
                     'prediction': result['prediction']
+                })
+            
+            # Video результат
+            if video_result and video_result.get('success'):
+                available_results.append({
+                    'name': 'video',
+                    'score': video_result['probability'],
+                    'prediction': video_result['prediction']
+                })
+            
+            # CV+Audio результат
+            if cv_audio_result and cv_audio_result.get('success'):
+                available_results.append({
+                    'name': 'cv_audio',
+                    'score': cv_audio_result['probability'],
+                    'prediction': cv_audio_result['prediction']
+                })
+            
+            # Создаём ensemble, если есть хотя бы 2 модели
+            if len(available_results) >= 2:
+                scores = [r['score'] for r in available_results]
+                predictions = [r['prediction'] for r in available_results]
+                
+                # Простое среднее вероятностей
+                ensemble_score = np.mean(scores)
+                ensemble_prediction = 1 if ensemble_score >= 0.5 else 0
+                
+                # Проверяем согласованность
+                agreement = len(set(predictions)) == 1
+                
+                ensemble_result = {
+                    'ensemble_score': float(ensemble_score),
+                    'ensemble_prediction': int(ensemble_prediction),
+                    'ensemble_prediction_label': 'experimental' if ensemble_prediction == 1 else 'control',
+                    'models_used': [r['name'] for r in available_results],
+                    'individual_scores': {r['name']: r['score'] for r in available_results},
+                    'individual_predictions': {r['name']: r['prediction'] for r in available_results},
+                    'agreement': agreement,
+                    'risk_level': 'high' if ensemble_score >= 0.7 else 'medium' if ensemble_score >= 0.4 else 'low'
                 }
                 
-                ensemble_result = create_ensemble_prediction(
-                    audio_nlp_result=audio_nlp_result,
-                    video_result=video_result
-                )
-                
                 print(f"\n[Ensemble Prediction]")
-                print(f"  Audio+NLP score: {ensemble_result['audio_nlp_score']:.3f}")
-                print(f"  Video score: {ensemble_result['video_score']:.3f}")
+                for r in available_results:
+                    print(f"  {r['name']} score: {r['score']:.3f}")
                 print(f"  Ensemble score: {ensemble_result['ensemble_score']:.3f}")
-                print(f"  Ensemble prediction: {'RISK' if ensemble_result['ensemble_prediction'] == 1 else 'CONTROL'}")
-                print(f"  Models agreement: {'Yes' if ensemble_result['agreement'] else 'No'}")
+                print(f"  Ensemble prediction: {ensemble_result['ensemble_prediction_label'].upper()}")
+                print(f"  Models agreement: {'Yes' if agreement else 'No'}")
+            elif len(available_results) == 1:
+                # Только одна модель - используем её результат как ensemble
+                r = available_results[0]
+                ensemble_result = {
+                    'ensemble_score': float(r['score']),
+                    'ensemble_prediction': int(r['prediction']),
+                    'ensemble_prediction_label': 'experimental' if r['prediction'] == 1 else 'control',
+                    'models_used': [r['name']],
+                    'individual_scores': {r['name']: r['score']},
+                    'individual_predictions': {r['name']: r['prediction']},
+                    'agreement': True,
+                    'risk_level': 'high' if r['score'] >= 0.7 else 'medium' if r['score'] >= 0.4 else 'low'
+                }
             
             result['video_result'] = video_result
+            result['cv_audio_result'] = cv_audio_result
             result['ensemble_result'] = ensemble_result
             
             # Also get segment-level analysis for visualization (using segment model)

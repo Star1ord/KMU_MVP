@@ -1,0 +1,28 @@
+# CV+Audio Pipeline Dependencies
+
+# Face detection (optional: improves detection quality)
+retinaface>=0.0.17
+
+# Image processing
+opencv-python>=4.7.0
+Pillow>=9.0.0
+
+# Visual features
+# Used for VGG16 fc1+fc2 (8192-dim) feature extraction.
+tensorflow>=2.10.0
+
+# Audio features (shared with general pipeline)
+# These are imported from src.pipeline.general_pipeline
+# but listed here for completeness:
+# - openSMILE (included in project)
+# - pydub>=0.25.1
+
+# MFCC extraction
+librosa>=0.10.0
+soundfile>=0.12.0
+
+# ONNX inference
+onnxruntime>=1.16.0
+
+# Model loading
+numpy>=1.24.0
