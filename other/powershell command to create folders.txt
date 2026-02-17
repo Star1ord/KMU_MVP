@@ -1,0 +1,132 @@
+# -----------------------------
+# 1) Folders
+# -----------------------------
+$dirs = @(
+  "config",
+  "models\nlp_model",
+  "models\cv_model",
+  "models\cv_audio_model",
+  "data\features",
+  "data\processed_csv",
+  "src\core",
+  "src\inputs",
+  "src\preprocessing",
+  "src\pipeline\general_pipeline",
+  "src\pipeline\cv_audio_pipeline",
+  "src\models",
+  "src\utils",
+  "video_integration",
+  "api\routes",
+  "docker",
+  "deploy\k8s",
+  "deploy\helm",
+  "deploy\scripts",
+  "monitoring\prometheus",
+  "monitoring\grafana",
+  "monitoring\logging",
+  "scripts",
+  "tests\unit",
+  "tests\integration",
+  "examples\sample_data"
+)
+
+$dirs | ForEach-Object { New-Item -ItemType Directory -Force -Path $_ | Out-Null }
+
+# -----------------------------
+# 2) Placeholder files
+# -----------------------------
+$files = @(
+  "config\model_registry.yaml",
+  "config\preprocessing_config.yaml",
+  "config\secrets.example.env",
+
+  "models\nlp_model\model.pkl",
+  "models\nlp_model\metadata.json",
+  "models\cv_model\model.joblib",
+  "models\cv_model\metadata.json",
+  "models\cv_audio_model\model.joblib",
+  "models\cv_audio_model\metadata.json",
+
+  "src\core\model_registry.py",
+  "src\core\model_base.py",
+  "src\core\inference_engine.py",
+
+  "src\inputs\input_types.py",
+  "src\inputs\input_validator.py",
+  "src\inputs\input_loader.py",
+
+  "src\preprocessing\base.py",
+  "src\preprocessing\audio_preprocessor.py",
+  "src\preprocessing\text_preprocessor.py",
+  "src\preprocessing\image_preprocessor.py",
+  "src\preprocessing\pipeline.py",
+
+  "src\pipeline\cv_audio_pipeline\extract_frames.py",
+  "src\pipeline\cv_audio_pipeline\face_detection.py",
+  "src\pipeline\cv_audio_pipeline\align_and_crop.py",
+  "src\pipeline\cv_audio_pipeline\extract_visual_features.py",
+  "src\pipeline\cv_audio_pipeline\aggregate_video_features.py",
+  "src\pipeline\cv_audio_pipeline\requirements_cv_audio.txt",
+
+  "src\models\nlp_model.py",
+  "src\models\cv_model.py",
+  "src\models\cv_audio_model.py",
+
+  "src\utils\paths.py",
+  "src\utils\logger.py",
+  "src\utils\metrics.py",
+
+  "video_integration\process_video.py",
+  "video_integration\realtime_test.py",
+  "video_integration\use_video_model.py",
+  "video_integration\train_video_model.py",
+
+  "api\main.py",
+  "api\routes\predict.py",
+  "api\routes\health.py",
+  "api\schemas.py",
+
+  "docker\base.Dockerfile",
+  "docker\inference.Dockerfile",
+  "docker\worker.Dockerfile",
+  "docker\docker-compose.yml",
+
+  "deploy\scripts\deploy-prod.sh",
+
+  "scripts\run_inference.py",
+  "scripts\preprocess_video.py",
+  "scripts\batch_predict.py",
+
+  "tests\unit\test_placeholder.py",
+  "tests\integration\test_placeholder.py",
+
+  "examples\example_single_predict.py",
+  "README.md"
+)
+
+$files | ForEach-Object {
+  $dir = Split-Path $_
+  if ($dir -and !(Test-Path $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
+  if (!(Test-Path $_)) { New-Item -ItemType File -Force -Path $_ | Out-Null }
+}
+
+# -----------------------------
+# 3) Add __init__.py to Python packages (so imports work cleanly)
+# -----------------------------
+$initFiles = @(
+  "src\__init__.py",
+  "src\core\__init__.py",
+  "src\inputs\__init__.py",
+  "src\preprocessing\__init__.py",
+  "src\pipeline\__init__.py",
+  "src\pipeline\general_pipeline\__init__.py",
+  "src\pipeline\cv_audio_pipeline\__init__.py",
+  "src\models\__init__.py",
+  "src\utils\__init__.py",
+  "api\__init__.py",
+  "api\routes\__init__.py"
+)
+
+$initFiles | ForEach-Object { if (!(Test-Path $_)) { New-Item -ItemType File -Force -Path $_ | Out-Null } }
+
+Write-Host "Done: folders + files scaffolded."

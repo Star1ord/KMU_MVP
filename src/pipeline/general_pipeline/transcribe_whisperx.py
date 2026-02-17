@@ -1,0 +1,324 @@
+import argparse
+import json
+import os
+import platform
+import sys
+from pathlib import Path
+from typing import List, Optional
+
+# КРИТИЧНО: Устанавливаем переменные окружения ДО импорта torch
+# Это предотвращает проблемы с mutex lock на macOS
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+if platform.system() == "Darwin":
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
+    os.environ.setdefault("MKL_NUM_THREADS", "1")
+    os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")
+    os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+    # Отключаем MPS для предотвращения проблем с mutex
+    os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+    os.environ.setdefault("PYTORCH_MPS_HIGH_WATERMARK_RATIO", "0.0")
+
+import torch
+
+# Устанавливаем количество потоков для macOS
+if platform.system() == "Darwin":
+    try:
+        torch.set_num_threads(1)
+        torch.set_num_interop_threads(1)
+    except Exception:
+        pass
+
+def patch_torch_load():
+    # patch for pytorch 2.6+ compatibility
+    try:
+        from omegaconf import ListConfig
+        from omegaconf.base import ContainerMetadata
+        import typing
+        
+        if hasattr(torch.serialization, "add_safe_globals"):
+            torch.serialization.add_safe_globals([
+                ListConfig,
+                ContainerMetadata,
+                typing.Any
+            ])
+    except ImportError:
+        pass
+    
+    original_load = torch.load
+    
+    def patched_load(*args, **kwargs):
+        kwargs["weights_only"] = False
+        return original_load(*args, **kwargs)
+    
+    torch.load = patched_load
+
+patch_torch_load()
+
+import psutil
+from tqdm import tqdm
+import whisperx
+
+_project_root = Path(__file__).parent.parent.parent
+if str(_project_root) not in sys.path:
+    sys.path.insert(0, str(_project_root))
+
+from pipeline.media_utils import (
+    MediaSample,
+    discover_media,
+    filter_samples,
+    migrate_transcript,
+)
+
+
+def detect_environment() -> dict:
+    is_mac = platform.system() == "Darwin"
+    total_memory_gb = psutil.virtual_memory().total / (1024**3)
+
+    if is_mac or total_memory_gb <= 16:
+        return {
+            "mode": "lightweight",
+            "description": "Mac / ограниченная память",
+            "default_model": "medium",
+            "batch_size": 4,
+        }
+
+    return {
+        "mode": "server",
+        "description": "Сервер / мощное железо",
+        "default_model": "medium",
+        "batch_size": 16,
+    }
+
+
+def select_samples(
+    samples: List[MediaSample],
+    transcripts_root: Path,
+    file_ids: Optional[List[str]],
+    limit: Optional[int],
+    force: bool,
+) -> List[MediaSample]:
+    selected = filter_samples(samples, file_ids)
+    tasks: List[MediaSample] = []
+
+    for sample in selected:
+        if not sample.wav_path.exists():
+            print(f"warning: skipping {sample.file_id}: wav not found ({sample.wav_path})")
+            continue
+
+        migrated = migrate_transcript(sample, transcripts_root)
+
+        if not force and not migrated and not sample.needs_transcript(transcripts_root):
+            continue
+
+        tasks.append(sample)
+        if limit is not None and len(tasks) >= limit:
+            break
+
+    return tasks
+
+
+def transcribe_audio(
+    sample: MediaSample,
+    transcripts_root: Path,
+    model,
+    align_model,
+    align_metadata,
+    language: str,
+    device: str,
+    batch_size: int,
+) -> bool:
+    output_path = sample.transcript_path(transcripts_root)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        print(f"processing {sample.file_id}...", flush=True)
+        
+        # Загрузка аудио с обработкой ошибок
+        try:
+            audio = whisperx.load_audio(str(sample.wav_path))
+            print(f"loading audio: {len(audio) / 16000:.1f} sec", flush=True)
+        except Exception as exc:
+            print(f"error loading audio for {sample.file_id}: {exc}", flush=True)
+            return False
+        
+        # Транскрибация с обработкой ошибок
+        try:
+            print(f"transcribing...", flush=True)
+            result = model.transcribe(audio, language=language, batch_size=batch_size)
+            
+            if not result or "segments" not in result or len(result["segments"]) == 0:
+                print(f"warning: no segments found for {sample.file_id}", flush=True)
+                return False
+        except Exception as exc:
+            print(f"error transcribing {sample.file_id}: {exc}", flush=True)
+            import traceback
+            traceback.print_exc()
+            return False
+        
+        # Выравнивание временных меток с обработкой ошибок
+        try:
+            print(f"aligning timestamps...", flush=True)
+            aligned = whisperx.align(
+                result["segments"],
+                align_model,
+                align_metadata,
+                audio,
+                device=device,
+                return_char_alignments=False,
+            )
+            
+            if not aligned or "segments" not in aligned:
+                print(f"warning: alignment failed for {sample.file_id}", flush=True)
+                return False
+        except Exception as exc:
+            print(f"error aligning {sample.file_id}: {exc}", flush=True)
+            import traceback
+            traceback.print_exc()
+            return False
+
+        # Сохранение результата
+        try:
+            with open(output_path, "w", encoding="utf-8") as fp:
+                json.dump(aligned, fp, ensure_ascii=False, indent=2)
+            print(f"done: {sample.file_id}", flush=True)
+            return True
+        except Exception as exc:
+            print(f"error saving transcript for {sample.file_id}: {exc}", flush=True)
+            return False
+            
+    except Exception as exc:
+        print(f"unexpected error transcribing {sample.file_id}: {exc}", flush=True)
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+def batch_transcribe(
+    input_dir: Path,
+    output_dir: Path,
+    model_name: Optional[str],
+    language: str,
+    device: str,
+    batch_size: Optional[int],
+    compute_type: str,
+    file_ids: Optional[List[str]],
+    limit: Optional[int],
+    force: bool,
+) -> None:
+    env = detect_environment()
+    model_name = model_name or env["default_model"]
+    batch_size = batch_size or env["batch_size"]
+
+    print(f"\n=== whisperx ===")
+    print(f"environment: {env['description']}")
+    print(f"model: {model_name}")
+    print(f"batch size: {batch_size}")
+    print(f"device: {device}, compute_type: {compute_type}")
+    print("================\n")
+
+    samples = discover_media(input_dir)
+    if not samples:
+        print(f"warning: no files found in {input_dir}")
+        return
+
+    tasks = select_samples(samples, output_dir, file_ids, limit, force)
+    if not tasks:
+        print("all selected files already have transcripts")
+        return
+
+    print(f"loading whisper model '{model_name}'...")
+    print("(this may take 30-60 seconds on first run)", flush=True)
+    
+    # Загружаем модель с обработкой ошибок mutex lock
+    model = None
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            model = whisperx.load_model(
+                model_name,
+                device=device,
+                compute_type=compute_type,
+            )
+            print("model loaded\n", flush=True)
+            break
+        except Exception as exc:
+            error_msg = str(exc)
+            if "mutex" in error_msg.lower() or "lock" in error_msg.lower():
+                if attempt < max_retries - 1:
+                    import time
+                    wait_time = (attempt + 1) * 2
+                    print(f"mutex lock error, retrying in {wait_time}s... (attempt {attempt + 1}/{max_retries})", flush=True)
+                    time.sleep(wait_time)
+                    continue
+            print(f"error loading whisper model: {exc}", flush=True)
+            import traceback
+            traceback.print_exc()
+            raise
+    
+    if model is None:
+        raise RuntimeError("Failed to load whisper model after multiple attempts")
+
+    print(f"loading alignment model for language '{language}'...", flush=True)
+    try:
+        align_model, align_metadata = whisperx.load_align_model(
+            language_code=language,
+            device=device,
+        )
+        print("alignment model loaded\n", flush=True)
+    except Exception as exc:
+        print(f"error loading alignment model: {exc}", flush=True)
+        import traceback
+        traceback.print_exc()
+        raise
+
+    print(f"starting transcription of {len(tasks)} files...\n")
+    success = 0
+    for idx, sample in enumerate(tasks, 1):
+        print(f"[{idx}/{len(tasks)}] ", end="", flush=True)
+        if transcribe_audio(
+            sample,
+            transcripts_root=output_dir,
+            model=model,
+            align_model=align_model,
+            align_metadata=align_metadata,
+            language=language,
+            device=device,
+            batch_size=batch_size,
+        ):
+            success += 1
+        print()
+
+    print(f"success: {success}/{len(tasks)} files transcribed")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="transcribe audio with whisperx")
+    parser.add_argument("--input-dir", type=str, default="data/audio_wav")
+    parser.add_argument("--output-dir", type=str, default="data/transcripts")
+    parser.add_argument("--model", type=str, default=None, choices=["tiny", "base", "small", "medium", "large"])
+    parser.add_argument("--language", type=str, default="ru")
+    parser.add_argument("--device", type=str, default="cpu", choices=["cpu", "cuda"])
+    parser.add_argument("--compute-type", type=str, default="int8")
+    parser.add_argument("--batch-size", type=int, default=None)
+    parser.add_argument("--file-ids", nargs="+", default=None)
+    parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument("--force", action="store_true")
+
+    args = parser.parse_args()
+
+    batch_transcribe(
+        input_dir=Path(args.input_dir),
+        output_dir=Path(args.output_dir),
+        model_name=args.model,
+        language=args.language,
+        device=args.device,
+        batch_size=args.batch_size,
+        compute_type=args.compute_type,
+        file_ids=args.file_ids,
+        limit=args.limit,
+        force=args.force,
+    )
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,2 @@
+python test_models.py
+python api/main.py

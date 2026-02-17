@@ -1,0 +1,39 @@
+project_root/
+├── app.py                  # Main FastAPI app (or main.py)
+├── config.py              # Configuration & settings management
+├── requirements.txt       # Dependencies
+├── .env                   # Environment variables (DON'T commit)
+├── .env.example           # Template for .env
+│
+├── models/                # Pre-trained model files
+│   ├── nlp_model.pkl
+│   ├── cv_audio_model.joblib
+│   └── ...
+│
+├── config/                # Configuration files
+│   ├── models_config.yaml # Model paths & params
+│   ├── logging_config.yaml
+│   └── api_config.yaml
+│
+├── schemas/               # Pydantic models for requests/responses
+│   ├── __init__.py
+│   ├── nlp_schemas.py
+│   └── cv_audio_schemas.py
+│
+├── routes/                # API endpoints
+│   ├── __init__.py
+│   ├── nlp.py             # NLP endpoints
+│   ├── cv_audio.py        # CV+Audio endpoints
+│   └── health.py          # Health check
+│
+├── utils/                 # Utility functions
+│   ├── __init__.py
+│   ├── logger.py
+│   └── validators.py
+│
+├── logs/                  # Application logs
+│   └── .gitkeep
+│
+└── data/                  # Test data
+    ├── input/
+    └── output/
