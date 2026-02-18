@@ -126,6 +126,7 @@ async def _analyze_uploaded_video(
             False,  # add_to_training
             "medium",  # whisper_model
             skip_transcription,
+            True,  # skip_video -> disable video-only model (keep CV+Audio)
         )
         return result
     finally:

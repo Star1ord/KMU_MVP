@@ -1,28 +1,36 @@
-# CV+Audio Pipeline Dependencies
+# CV+Audio Pipeline Dependencies (pinned for Python 3.10, CPU-first)
 
 # Face detection (optional: improves detection quality)
-retinaface>=0.0.17
+retinaface==0.0.6
 
 # Image processing
-opencv-python>=4.7.0
-Pillow>=9.0.0
+opencv-python==4.7.0
+Pillow==9.4.0
 
 # Visual features
-# Used for VGG16 fc1+fc2 (8192-dim) feature extraction.
-tensorflow>=2.10.0
+# Using CPU build of TensorFlow compatible with Python 3.10.
+# If you have a GPU and want GPU TF, replace with a suitable tensorflow package.
+tensorflow-cpu==2.10.0
 
 # Audio features (shared with general pipeline)
-# These are imported from src.pipeline.general_pipeline
-# but listed here for completeness:
-# - openSMILE (included in project)
-# - pydub>=0.25.1
+# openSMILE is included in-project where needed; pydub is used for simple audio I/O
+pydub>=0.25.1
 
-# MFCC extraction
-librosa>=0.10.0
-soundfile>=0.12.0
+# MFCC / audio processing
+librosa==0.10.0
+soundfile==0.12.1
 
-# ONNX inference
-onnxruntime>=1.16.0
+# ONNX inference (1.15 is chosen for broader numpy compatibility on Py3.10)
+onnxruntime==1.15.1
 
-# Model loading
-numpy>=1.24.0
+# Numerical / model-loading
+# Pin numpy to 1.23.x to remain compatible with tensorflow-cpu 2.10
+numpy==1.23.5
+
+protobuf>=4.25.3,<5.0
+
+# Notes:
+# - These pins prioritize compatibility with Python 3.10 and CPU-only installs.
+# - If other requirement files in the repo demand newer numpy (>=1.24), you should
+#   align them to numpy==1.23.5 or move TensorFlow workloads to a separate env.
+# - For PyTorch-based features, install torch/torchaudio separately matching CPU/CUDA.

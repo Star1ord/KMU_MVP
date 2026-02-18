@@ -46,6 +46,7 @@ def analyze_new_media_file(
     add_to_training: bool = False,
     whisper_model: str = 'medium',
     skip_transcription: bool = False,
+    skip_video: bool = False,
 ) -> Dict:
     """
     Analyze a single media file and return predictions
@@ -170,21 +171,27 @@ def analyze_new_media_file(
         video_result = None
         cv_audio_result = None
         ensemble_result = None
-        
-        # Обработка видео (независимо от успешности аудио+NLP пайплайна)
+
+        # Determine whether input file is video (used for CV/AV pipelines)
+        media_ext = media_file.suffix.lower()
+        is_video = media_ext in ['.mp4', '.mov', '.mkv', '.avi', '.webm']
+
         # Try to import video ensemble lazily to avoid heavy imports at module import time
-        try:
-            from inference.video_ensemble import (
-                process_video_for_prediction,
-                predict_with_video_model,
-                create_ensemble_prediction,
-            )
-            VIDEO_ENSEMBLE_AVAILABLE = True
-        except Exception as e:
-            VIDEO_ENSEMBLE_AVAILABLE = False
-            VIDEO_IMPORT_ERROR = str(e)
-        
-        # Try to import CV+Audio pipeline
+        VIDEO_ENSEMBLE_AVAILABLE = False
+        VIDEO_IMPORT_ERROR = None
+        if not skip_video:
+            try:
+                from inference.video_ensemble import (
+                    process_video_for_prediction,
+                    predict_with_video_model,
+                    create_ensemble_prediction,
+                )
+                VIDEO_ENSEMBLE_AVAILABLE = True
+            except Exception as e:
+                VIDEO_ENSEMBLE_AVAILABLE = False
+                VIDEO_IMPORT_ERROR = str(e)
+
+        # Try to import CV+Audio pipeline (we keep this available even if video model is skipped)
         try:
             from src.pipeline.cv_audio_pipeline import predict_cv_audio as predict_cv_audio_func
             CV_AUDIO_AVAILABLE = True
@@ -192,54 +199,51 @@ def analyze_new_media_file(
             CV_AUDIO_AVAILABLE = False
             CV_AUDIO_IMPORT_ERROR = str(e)
 
-        if VIDEO_ENSEMBLE_AVAILABLE:
-            media_ext = media_file.suffix.lower()
-            is_video = media_ext in ['.mp4', '.mov', '.mkv', '.avi', '.webm']
-            
-            if is_video:
-                print(f"\n{'='*80}")
-                print("VIDEO PROCESSING (independent from audio+NLP pipeline)")
-                print(f"{'='*80}")
-                
-                try:
-                    # Используем оригинальный путь к файлу (не временный)
-                    video_csv_path, video_error = process_video_for_prediction(
-                        video_path=str(media_file),
-                        output_dir=None,
-                        sample_every=3,
-                        use_emotions=None
+        # Video processing (only if not skipped and video ensemble available)
+        if not skip_video and VIDEO_ENSEMBLE_AVAILABLE and is_video:
+            print(f"\n{'='*80}")
+            print("VIDEO PROCESSING (independent from audio+NLP pipeline)")
+            print(f"{'='*80}")
+
+            try:
+                # Используем оригинальный путь к файлу (не временный)
+                video_csv_path, video_error = process_video_for_prediction(
+                    video_path=str(media_file),
+                    output_dir=None,
+                    sample_every=3,
+                    use_emotions=None
+                )
+
+                if video_csv_path and not video_error:
+                    print(f"Video features CSV created: {video_csv_path}")
+
+                    video_pred_result = predict_with_video_model(
+                        video_csv_path=video_csv_path,
+                        model_path=None,
+                        threshold=0.6
                     )
-                    
-                    if video_csv_path and not video_error:
-                        print(f"Video features CSV created: {video_csv_path}")
-                        
-                        video_pred_result = predict_with_video_model(
-                            video_csv_path=video_csv_path,
-                            model_path=None,
-                            threshold=0.6
-                        )
-                        
-                        if video_pred_result['success']:
-                            video_result = video_pred_result
-                            print(f"\n[Video Model Prediction]")
-                            print(f"  Video score: {video_result['probability']:.3f}")
-                            print(f"  Prediction: {'RISK' if video_result['prediction'] == 1 else 'CONTROL'}")
-                            print(f"  Risk level: {video_result['risk_level']}")
-                        else:
-                            print(f"Video prediction failed: {video_pred_result.get('error', 'Unknown error')}")
+
+                    if video_pred_result['success']:
+                        video_result = video_pred_result
+                        print(f"\n[Video Model Prediction]")
+                        print(f"  Video score: {video_result['probability']:.3f}")
+                        print(f"  Prediction: {'RISK' if video_result['prediction'] == 1 else 'CONTROL'}")
+                        print(f"  Risk level: {video_result['risk_level']}")
                     else:
-                        print(f"Video processing failed: {video_error}")
-                except Exception as video_e:
-                    print(f"Error in video processing: {video_e}")
-                    import traceback
-                    traceback.print_exc()
-        
-        # CV+Audio processing (if available and video file)
+                        print(f"Video prediction failed: {video_pred_result.get('error', 'Unknown error')}")
+                else:
+                    print(f"Video processing failed: {video_error}")
+            except Exception as video_e:
+                print(f"Error in video processing: {video_e}")
+                import traceback
+                traceback.print_exc()
+
+        # CV+Audio processing (if available and input is video) — keep this even when skip_video=True
         if CV_AUDIO_AVAILABLE and is_video:
             print(f"\n{'='*80}")
             print("CV+AUDIO PROCESSING")
             print(f"{'='*80}")
-            
+
             try:
                 cv_audio_pred_result = predict_cv_audio_func(
                     video_path=str(media_file),
@@ -247,7 +251,7 @@ def analyze_new_media_file(
                     threshold=0.5,
                     sample_rate=1.0,
                 )
-                
+
                 if cv_audio_pred_result.get('success'):
                     cv_audio_result = cv_audio_pred_result
                     print(f"\n[CV+Audio Model Prediction]")
@@ -473,7 +477,7 @@ def analyze_new_media_file(
             # Audio+NLP результат (основной)
             if result.get('success') and result.get('risk_score') is not None:
                 available_results.append({
-                    'name': 'audio_nlp',
+                    'name': 'nlp',
                     'score': result['risk_score'],
                     'prediction': result['prediction']
                 })
@@ -652,7 +656,72 @@ def analyze_new_media_file(
         except Exception as e:
             print(f"Warning: Could not clean up temp dir: {e}")
     
-    return result
+    # Build a cleaned, structured output for easier consumption while
+    # keeping the original `result` for backward compatibility.
+    try:
+        ensemble = result.get('ensemble_result') if result.get('ensemble_result') else None
+
+        # Per-model summaries
+        models_summary = {}
+        # NLP / audio model (nlp) is represented by top-level prediction/risk_score
+        models_summary['nlp'] = {
+            'success': bool(result.get('success', False)),
+            'prediction': int(result.get('prediction')) if result.get('prediction') is not None else None,
+            'risk_level': result.get('risk_level'),
+            'probability': float(result.get('risk_score')) if result.get('risk_score') is not None else None
+        }
+
+        # CV+Audio model
+        if result.get('cv_audio_result'):
+            cv = result['cv_audio_result']
+            models_summary['cv_audio'] = {
+                'success': bool(cv.get('success', False)),
+                'prediction': int(cv.get('prediction')) if cv.get('prediction') is not None else None,
+                'risk_level': cv.get('risk_level'),
+                'probability': float(cv.get('probability')) if cv.get('probability') is not None else None,
+                'error': cv.get('error')
+            }
+        else:
+            models_summary['cv_audio'] = None
+
+        # Overall / ensemble summary
+        overall = {
+            'success': bool(result.get('success', False)),
+            'prediction': int(result.get('prediction')) if result.get('prediction') is not None else None,
+            'risk_level': result.get('risk_level'),
+            'risk_score': float(result.get('risk_score')) if result.get('risk_score') is not None else None,
+            'ensemble': None
+        }
+
+        if ensemble:
+            overall['ensemble'] = {
+                'ensemble_score': float(ensemble.get('ensemble_score')),
+                'ensemble_prediction': int(ensemble.get('ensemble_prediction')),
+                'ensemble_prediction_label': ensemble.get('ensemble_prediction_label'),
+                'models_used': ensemble.get('models_used'),
+                'individual_scores': ensemble.get('individual_scores'),
+                'individual_predictions': ensemble.get('individual_predictions'),
+                'agreement': bool(ensemble.get('agreement')),
+                'risk_level': ensemble.get('risk_level')
+            }
+
+        pretty = {
+            'success': result.get('success', False),
+            'session_id': result.get('session_id'),
+            'overall': overall,
+            'models': models_summary,
+            'segments': result.get('segments', []),
+            'features_csv': result.get('features_csv'),
+            'audio_path': result.get('audio_path'),
+            'error': result.get('error'),
+        }
+
+    except Exception:
+        # If formatting fails for any reason, fall back to original result
+        return result
+
+    # Return the pretty formatted result while keeping the original raw data
+    return {'formatted_result': pretty, 'raw_result': result}
 
 
 def analyze_multiple_media_files(
