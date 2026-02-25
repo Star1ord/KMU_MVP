@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import csv
 import subprocess
 import sys
@@ -26,13 +27,28 @@ def run_command(cmd: List[str], description: str) -> bool:
 
     try:
         project_root = _project_root
-        subprocess.run(cmd, check=True, cwd=str(project_root))
+        # Capture output so we can log details on failure
+        completed = subprocess.run(cmd, check=True, cwd=str(project_root), capture_output=True, text=True)
         elapsed = time.time() - start_time
+        if completed.stdout:
+            print(completed.stdout)
+        if completed.stderr:
+            print(completed.stderr)
         print(f"done: {description} completed in {elapsed:.1f}s ({elapsed/60:.1f} min)")
         return True
     except subprocess.CalledProcessError as exc:
         elapsed = time.time() - start_time
         print(f"error: {description} failed (code {exc.returncode}, time: {elapsed:.1f}s)")
+        # Print captured output to help debugging
+        try:
+            if exc.stdout:
+                print("--- stdout ---")
+                print(exc.stdout)
+            if exc.stderr:
+                print("--- stderr ---")
+                print(exc.stderr)
+        except Exception:
+            pass
         return False
 
 
@@ -118,6 +134,7 @@ def main():
     parser.add_argument("--skip-features", action="store_true")
     parser.add_argument("--skip-merge", action="store_true")
     parser.add_argument("--aggregate", action="store_true")
+    parser.add_argument("--yes", "-y", action="store_true", help="Assume yes for interactive prompts")
 
     parser.add_argument("--whisper-model", type=str, default="medium")
     parser.add_argument("--whisper-language", type=str, default="ru")
@@ -133,8 +150,10 @@ def main():
 
     if not check_dependencies():
         print("warning: missing dependencies. continue? (y/n)")
-        if input().strip().lower() != "y":
-            sys.exit(1)
+        auto_yes = args.yes or os.getenv('AUTO_YES', '').lower() in ('1', 'true', 'yes')
+        if not auto_yes:
+            if input().strip().lower() != "y":
+                sys.exit(1)
 
     base_dir = Path(args.data_dir)
     audio_dir = Path("data/raw/audio_wav")

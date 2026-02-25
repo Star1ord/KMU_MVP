@@ -105,6 +105,9 @@ def run_pipeline(
     print(f"command: {' '.join(cmd)}\n")
     
     try:
+        # If AUTO_YES is set in the environment, pass --yes to the pipeline script
+        if os.getenv('AUTO_YES', '').lower() in ('1', 'true', 'yes'):
+            cmd.append('--yes')
         result = subprocess.run(cmd, check=True)
         print("pipeline completed successfully")
         return True

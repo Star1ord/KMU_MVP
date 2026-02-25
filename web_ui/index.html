@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>CV+Audio / NLP - Demo UI</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+  <div class="container">
+    <h1>Inference Demo — Upload Video</h1>
+
+    <div class="controls">
+      <label class="file-label">Выберите видео
+        <input id="videoInput" type="file" accept="video/*"> 
+      </label>
+
+      <div class="options">
+        <label><input type="radio" name="mode" value="all" checked> Все модели (NLP + CV+Audio)</label>
+        <label><input type="radio" name="mode" value="nlp"> Только NLP</label>
+        <label><input type="radio" name="mode" value="cv_audio"> Только CV+Audio</label>
+      </div>
+
+      <div class="buttons">
+        <button id="runBtn">Запустить</button>
+        <button id="clearBtn">Очистить</button>
+      </div>
+    </div>
+
+    <div id="status" class="status">Готов.</div>
+
+    <div id="resultArea" class="result-area">
+      <div id="textResult" class="text-result"></div>
+      <canvas id="probChart" height="150"></canvas>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

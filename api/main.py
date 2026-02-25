@@ -118,6 +118,8 @@ async def _analyze_uploaded_video(
             content = await file.read()
             out.write(content)
 
+        logger.info(f"Processing upload: {file.filename}")
+        
         # Run processing in threadpool to avoid blocking the event loop
         result = await run_in_threadpool(
             analyze_new_media_file,
@@ -128,6 +130,12 @@ async def _analyze_uploaded_video(
             skip_transcription,
             True,  # skip_video -> disable video-only model (keep CV+Audio)
         )
+        
+        if result is None:
+            logger.error(f"analyze_new_media_file returned None for {file.filename}")
+            raise ValueError("Processing returned no result")
+        
+        logger.info(f"Processing complete for {file.filename}: success={result.get('success')}")
         return result
     finally:
         # Best-effort cleanup
@@ -152,13 +160,34 @@ async def predict(
     End-to-end production endpoint.
 
     Upload a video file, run full preprocessing + NLP (and optional CV) models,
-    and return the same structure as in offline prod analyze_new_media_file.
+    and return the formatted result structure.
     """
-    return await _analyze_uploaded_video(
-        file=file,
-        skip_transcription=skip_transcription,
-        label=label,
-    )
+    try:
+        result = await _analyze_uploaded_video(
+            file=file,
+            skip_transcription=skip_transcription,
+            label=label,
+        )
+        
+        if result is None:
+            logger.error("_analyze_uploaded_video returned None")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Processing failed: no result returned"
+            )
+        
+        # Return formatted result if available, otherwise raw
+        output = result.get('formatted_result', result)
+        logger.info(f"✓ /predict returned successfully for {file.filename}")
+        return output
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"✗ /predict error: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Processing failed: {str(e)}"
+        )
 
 
 @app.post("/test/nlp")
@@ -168,40 +197,63 @@ async def test_nlp(
     label: int | None = None,
 ):
     """
-    NLP-focused endpoint with the same semantics, как продовая модель.
-
-    Принимает видео, прогоняет его через тот же analyze_new_media_file,
-    что и /predict (полный пайплайн и продовая late_fusion_v3_clean),
-    но возвращает компактный ответ, сфокусированный на NLP-результате.
+    NLP-focused endpoint.
+    Returns compact NLP result with prediction, risk_score, and risk_level.
     """
-    raw = await _analyze_uploaded_video(
-        file=file,
-        skip_transcription=skip_transcription,
-        label=label,
-    )
+    try:
+        result = await _analyze_uploaded_video(
+            file=file,
+            skip_transcription=skip_transcription,
+            label=label,
+        )
+        
+        if result is None:
+            logger.error("_analyze_uploaded_video returned None for /test/nlp")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Processing failed: no result returned"
+            )
+        
+        # Extract raw result (contains top-level prediction/risk_score from NLP model)
+        raw = result.get('raw_result', result)
+        
+        if raw is None:
+            logger.error("raw_result extraction failed for /test/nlp")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Processing failed: could not extract results"
+            )
 
-    prediction = raw.get("prediction")
-    risk_score = raw.get("risk_score")
-    risk_level = raw.get("risk_level")
+        prediction = raw.get("prediction")
+        risk_score = raw.get("risk_score")
+        risk_level = raw.get("risk_level")
 
-    # 0 = контрольная группа, 1 = экспериментальная (risk)
-    if prediction == 1:
-        prediction_label = "experimental"  # RISK
-    elif prediction == 0:
-        prediction_label = "control"  # CONTROL
-    else:
-        prediction_label = None
+        # 0 = контрольная группа, 1 = экспериментальная (risk)
+        if prediction == 1:
+            prediction_label = "experimental"  # RISK
+        elif prediction == 0:
+            prediction_label = "control"  # CONTROL
+        else:
+            prediction_label = None
 
-    return {
-        "success": bool(raw.get("success", False)),
-        "prediction": prediction,
-        "prediction_label": prediction_label,
-        "risk_score": risk_score,
-        "risk_level": risk_level,
-        # Для дальнейшей визуализации можно вернуть сегменты,
-        # но без технических полей вроде features_csv и audio_path.
-        "segments": raw.get("segments", []),
-    }
+        output = {
+            "success": bool(raw.get("success", False)),
+            "prediction": prediction,
+            "prediction_label": prediction_label,
+            "risk_score": risk_score,
+            "risk_level": risk_level,
+            "segments": raw.get("segments", []),
+        }
+        logger.info(f"✓ /test/nlp returned successfully for {file.filename}")
+        return output
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"✗ /test/nlp error: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Processing failed: {str(e)}"
+        )
 
 
 @app.post("/test/cv")
@@ -291,52 +343,68 @@ async def predict_cv_audio_endpoint(
     
     Возвращает probability, prediction, prediction_label и risk_level.
     """
-    if predict_cv_audio is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="CV+Audio pipeline not available on this server",
-        )
-
-    _validate_video_content_type(file)
-
-    tmp_dir = tempfile.mkdtemp(prefix="api_cv_audio_upload_")
-    tmp_path = Path(tmp_dir) / file.filename
-
     try:
-        # Save upload
-        with open(tmp_path, "wb") as out:
-            content = await file.read()
-            out.write(content)
+        if predict_cv_audio is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="CV+Audio pipeline not available on this server",
+            )
 
-        # Run CV+Audio prediction
-        result = await run_in_threadpool(
-            predict_cv_audio,
-            str(tmp_path),
-            None,  # model_path (auto-detect)
-            threshold,
-            sample_rate,
+        _validate_video_content_type(file)
+
+        tmp_dir = tempfile.mkdtemp(prefix="api_cv_audio_upload_")
+        tmp_path = Path(tmp_dir) / file.filename
+
+        try:
+            # Save upload
+            with open(tmp_path, "wb") as out:
+                content = await file.read()
+                out.write(content)
+
+            # Run CV+Audio prediction
+            result = await run_in_threadpool(
+                predict_cv_audio,
+                str(tmp_path),
+                None,  # model_path (auto-detect)
+                threshold,
+                sample_rate,
+            )
+
+            if result is None:
+                logger.error("predict_cv_audio returned None")
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="CV+Audio processing failed: no result returned"
+                )
+
+            # Ensure prediction_label is set
+            if result.get("success") and result.get("prediction") is not None:
+                if int(result["prediction"]) == 1:
+                    result["prediction_label"] = "experimental"
+                else:
+                    result["prediction_label"] = "control"
+
+            logger.info(f"✓ /predict/cv-audio returned successfully for {file.filename}")
+            return result
+        finally:
+            # Cleanup
+            try:
+                if tmp_path.exists():
+                    tmp_path.unlink()
+            except Exception:
+                pass
+            try:
+                Path(tmp_dir).rmdir()
+            except Exception:
+                pass
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"✗ /predict/cv-audio error: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Processing failed: {str(e)}"
         )
-
-        # Ensure prediction_label is set
-        if result.get("success") and result.get("prediction") is not None:
-            if int(result["prediction"]) == 1:
-                result["prediction_label"] = "experimental"
-            else:
-                result["prediction_label"] = "control"
-
-        return result
-
-    finally:
-        # Cleanup
-        try:
-            if tmp_path.exists():
-                tmp_path.unlink()
-        except Exception:
-            pass
-        try:
-            Path(tmp_dir).rmdir()
-        except Exception:
-            pass
 
 
 if __name__ == "__main__":

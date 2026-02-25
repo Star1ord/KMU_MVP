@@ -1,4 +1,11 @@
 Start:
+full: python run_all.py --auto-yes
+
+front: 
+cd web_ui
+python -m http.server 5500
+
+back
 py -3 -m uvicorn api.main:app --reload --host 0.0.0.0 --port 8000
 Open Swagger UI:
 http://127.0.0.1:8000/docs 

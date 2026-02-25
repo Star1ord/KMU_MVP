@@ -27,7 +27,11 @@ onnxruntime==1.15.1
 # Pin numpy to 1.23.x to remain compatible with tensorflow-cpu 2.10
 numpy==1.23.5
 
-protobuf>=4.25.3,<5.0
+# TensorFlow 2.10 requires protobuf <=3.20.x, NOT 4.x
+protobuf>=3.20,<3.21
+
+# Additional utilities
+setuptools>=65.0.0
 
 # Notes:
 # - These pins prioritize compatibility with Python 3.10 and CPU-only installs.

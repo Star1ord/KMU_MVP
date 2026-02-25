@@ -85,7 +85,8 @@ def analyze_new_media_file(
     media_file = Path(media_path)
     if not media_file.exists():
         result['error'] = f"File not found: {media_path}"
-        return result
+        # Return wrapped format even on error
+        return {'formatted_result': result, 'raw_result': result}
     
     session_id = media_file.stem
     result['session_id'] = session_id
@@ -641,12 +642,14 @@ def analyze_new_media_file(
             result['error'] = f"Model not found: {str(e)}"
             import traceback
             traceback.print_exc()
-            return result
+            # Return wrapped format even on error
+            return {'formatted_result': result, 'raw_result': result}
         except Exception as e:
             result['error'] = f"Error during analysis: {str(e)}"
             import traceback
             traceback.print_exc()
-            return result
+            # Return wrapped format even on error
+            return {'formatted_result': result, 'raw_result': result}
         
     finally:
         # Clean up temporary directory
@@ -718,7 +721,11 @@ def analyze_new_media_file(
 
     except Exception:
         # If formatting fails for any reason, fall back to original result
-        return result
+        # but ensure we still return the wrapped structure
+        try:
+            return {'formatted_result': result, 'raw_result': result}
+        except Exception:
+            return result
 
     # Return the pretty formatted result while keeping the original raw data
     return {'formatted_result': pretty, 'raw_result': result}
