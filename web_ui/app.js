@@ -60,6 +60,7 @@ function formatNumber(v){
   if(v === null || v === undefined) return '-'
   const n = Number(v)
   if(Number.isNaN(n)) return String(v)
+  if(n !== 0 && Math.abs(n) < 0.001) return n.toExponential(3)
   return (Math.round(n * 1000) / 1000).toString()
 }
 

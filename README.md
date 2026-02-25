@@ -1,16 +1,72 @@
-Start:
-full: python run_all.py --auto-yes
+## Current Start (local, current stage)
 
-front: 
+### 1) Full start (recommended)
+```bash
+python run_all.py --auto-yes
+```
+
+### 2) Start separately
+Frontend:
+```bash
 cd web_ui
 python -m http.server 5500
+```
 
-back
+Backend:
+```bash
 py -3 -m uvicorn api.main:app --reload --host 0.0.0.0 --port 8000
-Open Swagger UI:
-http://127.0.0.1:8000/docs 
+```
 
+Swagger:
+`http://127.0.0.1:8000/docs`
 
+UI:
+`http://127.0.0.1:5500`
+
+### Current working UI modes
+- All models (NLP + CV + CV+Audio)
+- NLP only
+- CV only
+- CV+Audio only
+- 4. Deception detection
+- 5. Emotion audio+video
+- 6. Anomaly: audio / video / text
+
+## Current Progress (February 25, 2026)
+
+This is the latest project state as of February 25, 2026.
+
+### Done
+- Frontend UI was rebuilt into a dashboard with:
+  - dynamic endpoint modes (radio options from config),
+  - summary + model metrics table,
+  - request metadata block,
+  - raw JSON viewer,
+  - multiple charts (scores, statuses, timeline, distribution).
+- `CV` mode is now available on frontend and mapped to `/test/cv`.
+- `/predict` now supports combined execution with `NLP + CV + CV+Audio`.
+- `/test/nlp` is isolated from CV/CV+Audio path to keep NLP testing faster.
+- `CV+Audio` probability display on frontend was fixed for tiny values
+  (scientific notation instead of showing `0` after rounding).
+- New test endpoints are integrated into UI:
+  - `/test/deception`
+  - `/test/emotion-av`
+  - `/test/anomaly/audio`
+  - `/test/anomaly/video`
+  - `/test/anomaly/text`
+
+### Backend stabilization done today
+- Added fallback logic for CV/CV+Audio runtime issues (including protobuf-related import problems).
+- Added lightweight CV extraction fallback path to avoid hard failures when heavy stack is unavailable.
+- Added configurable runtime options in prediction routes for easier testing.
+
+### Current known limitations
+- Deception / Emotion / Anomaly endpoints are currently proxy/rule-based test implementations
+  (not separate production-trained models yet).
+- Full combined mode can still be slow on long videos.
+- Some old text below in this README is historical and may not reflect the latest state.
+
+## Legacy Notes (partially outdated)
 Run the sample runner (local end-to-end test):
 
 py -3 -u run_sample_inference.py sample_data\215_2025.12.22.mp4
