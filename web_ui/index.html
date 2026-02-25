@@ -3,30 +3,23 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>CV+Audio / NLP - Demo UI</title>
-  <link rel="stylesheet" href="style.css">
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <meta http-equiv="Expires" content="0" />
+  <title>Inference Dashboard</title>
+  <link rel="stylesheet" href="style.css?v=20260225-2">
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 <body>
   <div class="container">
-    <h1>Inference Demo - Upload Video</h1>
+    <h1>Inference Dashboard</h1>
 
     <div class="controls">
       <label class="file-label">Выберите видео
         <input id="videoInput" type="file" accept="video/*">
       </label>
 
-      <div class="options">
-        <label><input type="radio" name="mode" value="all" checked> Все модели (NLP + CV + CV+Audio)</label>
-        <label><input type="radio" name="mode" value="nlp"> Только NLP</label>
-        <label><input type="radio" name="mode" value="cv"> Только CV</label>
-        <label><input type="radio" name="mode" value="cv_audio"> Только CV+Audio</label>
-        <label><input type="radio" name="mode" value="deception"> 4. Deception detection</label>
-        <label><input type="radio" name="mode" value="emotion_av"> 5. Emotion audio+video</label>
-        <label><input type="radio" name="mode" value="anomaly_audio"> 6. Anomaly audio</label>
-        <label><input type="radio" name="mode" value="anomaly_video"> 6. Anomaly video</label>
-        <label><input type="radio" name="mode" value="anomaly_text"> 6. Anomaly text</label>
-      </div>
+      <div id="modeOptions" class="options"></div>
 
       <div class="buttons">
         <button id="runBtn">Запустить</button>
@@ -36,12 +29,36 @@
 
     <div id="status" class="status">Готово.</div>
 
-    <div id="resultArea" class="result-area">
-      <div id="textResult" class="text-result"></div>
-      <canvas id="probChart" height="150"></canvas>
+    <div class="cards-grid">
+      <section id="summaryCard" class="card"></section>
+      <section id="metaCard" class="card"></section>
     </div>
+
+    <div class="charts-grid">
+      <section class="card chart-card">
+        <h3>Scores</h3>
+        <canvas id="scoreChart" height="170"></canvas>
+      </section>
+      <section class="card chart-card">
+        <h3>Statuses</h3>
+        <canvas id="statusChart" height="170"></canvas>
+      </section>
+      <section class="card chart-card">
+        <h3>Timeline</h3>
+        <canvas id="timelineChart" height="170"></canvas>
+      </section>
+      <section class="card chart-card">
+        <h3>Distribution</h3>
+        <canvas id="distributionChart" height="170"></canvas>
+      </section>
+    </div>
+
+    <section class="card raw-card">
+      <h3>Raw JSON</h3>
+      <pre id="rawJson">{}</pre>
+    </section>
   </div>
 
-  <script src="app.js"></script>
+  <script src="app.js?v=20260225-2"></script>
 </body>
 </html>
