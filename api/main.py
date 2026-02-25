@@ -4,6 +4,7 @@ import joblib, pickle
 from pathlib import Path
 import numpy as np
 import logging
+import pandas as pd
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -27,7 +28,7 @@ MODEL_PATHS = {
 
 models = {}
 for name, path in MODEL_PATHS.items():
-    if path.exists():
+    if path.exists() and path.stat().st_size > 0:
         try:
             # Prefer joblib (handles both joblib files and many pickle-based sklearn dumps).
             # Fall back to pickle if joblib fails for some rare cases.
@@ -39,7 +40,10 @@ for name, path in MODEL_PATHS.items():
         except Exception as e:
             logger.error(f"✗ {name} error: {type(e).__name__}: {e}")
     else:
-        logger.warning(f"⚠ {name} not found at {path}")
+        if path.exists():
+            logger.warning(f"⚠ {name} model file is empty at {path}")
+        else:
+            logger.warning(f"⚠ {name} not found at {path}")
 
 
 @app.get("/health")
@@ -99,6 +103,11 @@ async def _analyze_uploaded_video(
     file: UploadFile,
     skip_transcription: bool = False,
     label: int | None = None,
+    include_cv: bool = True,
+    include_cv_audio: bool = True,
+    whisper_model: str = "medium",
+    video_sample_every: int = 8,
+    cv_audio_sample_rate: float = 0.25,
 ) -> dict:
     """Common helper: save uploaded video, run full NLP(+video) pipeline, clean up."""
     if analyze_new_media_file is None:
@@ -126,9 +135,12 @@ async def _analyze_uploaded_video(
             str(tmp_path),
             label,
             False,  # add_to_training
-            "medium",  # whisper_model
+            whisper_model,
             skip_transcription,
-            True,  # skip_video -> disable video-only model (keep CV+Audio)
+            (not include_cv),  # skip_video
+            (not include_cv_audio),  # skip_cv_audio
+            int(video_sample_every),
+            float(cv_audio_sample_rate),
         )
         
         if result is None:
@@ -155,6 +167,10 @@ async def predict(
     file: UploadFile = File(...),
     skip_transcription: bool = False,
     label: int | None = None,
+    include_cv: bool = True,
+    include_cv_audio: bool = True,
+    video_sample_every: int = 8,
+    cv_audio_sample_rate: float = 0.25,
 ):
     """
     End-to-end production endpoint.
@@ -167,6 +183,11 @@ async def predict(
             file=file,
             skip_transcription=skip_transcription,
             label=label,
+            include_cv=include_cv,
+            include_cv_audio=include_cv_audio,
+            whisper_model="medium",
+            video_sample_every=video_sample_every,
+            cv_audio_sample_rate=cv_audio_sample_rate,
         )
         
         if result is None:
@@ -205,6 +226,9 @@ async def test_nlp(
             file=file,
             skip_transcription=skip_transcription,
             label=label,
+            include_cv=False,
+            include_cv_audio=False,
+            whisper_model="small",
         )
         
         if result is None:
@@ -259,6 +283,7 @@ async def test_nlp(
 @app.post("/test/cv")
 async def test_cv(
     file: UploadFile = File(...),
+    sample_every: int = 8,
 ):
     """
     CV-only endpoint: принимает видео, извлекает CV-фичи и прогоняет через видео-модель.
@@ -288,7 +313,7 @@ async def test_cv(
         csv_path, video_err = process_video_for_prediction(
             video_path=str(tmp_path),
             output_dir=None,
-            sample_every=3,
+            sample_every=max(1, int(sample_every)),
             use_emotions=None,
         )
 
@@ -335,7 +360,8 @@ async def test_cv(
 async def predict_cv_audio_endpoint(
     file: UploadFile = File(...),
     threshold: float = 0.5,
-    sample_rate: float = 1.0,
+    sample_rate: float = 0.25,
+    use_vgg: bool = False,
 ):
     """
     CV+Audio endpoint: принимает видео, извлекает лица (RetinaFace), 
@@ -368,6 +394,8 @@ async def predict_cv_audio_endpoint(
                 None,  # model_path (auto-detect)
                 threshold,
                 sample_rate,
+                13,  # n_mfcc
+                use_vgg,
             )
 
             if result is None:
@@ -405,6 +433,497 @@ async def predict_cv_audio_endpoint(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Processing failed: {str(e)}"
         )
+
+
+def _clamp01(value: float) -> float:
+    return float(max(0.0, min(1.0, value)))
+
+
+def _risk_level_from_score(score: float | None) -> str | None:
+    if score is None:
+        return None
+    if score >= 0.7:
+        return "high"
+    if score >= 0.4:
+        return "medium"
+    return "low"
+
+
+def _prediction_label(prediction: int | None) -> str | None:
+    if prediction is None:
+        return None
+    return "experimental" if int(prediction) == 1 else "control"
+
+
+def _segment_bounds(seg: dict) -> tuple[float, float, float]:
+    start = seg.get("start_time", seg.get("start", 0.0)) or 0.0
+    end = seg.get("end_time", seg.get("end", start)) or start
+    duration = seg.get("duration")
+    if duration is None:
+        duration = float(max(0.0, float(end) - float(start)))
+    return float(start), float(end), float(duration)
+
+
+def _cleanup_temp_csv(csv_path: str | None) -> None:
+    if not csv_path:
+        return
+    try:
+        p = Path(csv_path)
+        if p.exists():
+            p.unlink()
+        parent = p.parent
+        if parent.name.startswith("video_features_"):
+            try:
+                parent.rmdir()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+@app.post("/test/deception")
+async def test_deception(
+    file: UploadFile = File(...),
+    skip_transcription: bool = False,
+    label: int | None = None,
+):
+    """
+    Deception-style proxy model based on segment-level risk dynamics.
+    Uses only NLP pipeline outputs (no CV/CV+Audio).
+    """
+    try:
+        result = await _analyze_uploaded_video(
+            file=file,
+            skip_transcription=skip_transcription,
+            label=label,
+            include_cv=False,
+            include_cv_audio=False,
+            whisper_model="small",
+        )
+        raw = result.get("raw_result", result)
+        segments = raw.get("segments", []) if isinstance(raw, dict) else []
+
+        series = []
+        for seg in segments:
+            score = seg.get("risk_score")
+            if score is None:
+                continue
+            start, end, duration = _segment_bounds(seg)
+            if 3.0 <= duration <= 13.0:
+                series.append(
+                    {
+                        "start": start,
+                        "end": end,
+                        "duration": duration,
+                        "score": float(score),
+                    }
+                )
+
+        if not series:
+            for seg in segments:
+                score = seg.get("risk_score")
+                if score is None:
+                    continue
+                start, end, duration = _segment_bounds(seg)
+                series.append(
+                    {
+                        "start": start,
+                        "end": end,
+                        "duration": duration,
+                        "score": float(score),
+                    }
+                )
+
+        if not series:
+            return {
+                "success": False,
+                "deception_score": None,
+                "prediction": None,
+                "prediction_label": None,
+                "risk_level": None,
+                "segments_used": 0,
+                "time_series": [],
+                "error": "No segment-level scores available for deception analysis",
+            }
+
+        scores = np.array([x["score"] for x in series], dtype=float)
+        score_mean = float(np.mean(scores))
+        score_std = float(np.std(scores)) if len(scores) > 1 else 0.0
+        high_ratio = float(np.mean(scores >= 0.6))
+
+        deception_score = _clamp01(0.50 * score_mean + 0.35 * score_std + 0.15 * high_ratio)
+        prediction = 1 if deception_score >= 0.55 else 0
+
+        return {
+            "success": True,
+            "deception_score": deception_score,
+            "prediction": prediction,
+            "prediction_label": _prediction_label(prediction),
+            "risk_level": _risk_level_from_score(deception_score),
+            "segments_used": len(series),
+            "time_series": series,
+            "components": {
+                "mean": score_mean,
+                "std": score_std,
+                "high_ratio": high_ratio,
+            },
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"✗ /test/deception error: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Processing failed: {str(e)}",
+        )
+
+
+@app.post("/test/emotion-av")
+async def test_emotion_av(
+    file: UploadFile = File(...),
+    sample_every: int = 8,
+    sample_rate: float = 0.25,
+):
+    """
+    Emotion audio+video proxy:
+    - video emotion trajectory from CV pipeline CSV
+    - optional CV+Audio probability as arousal proxy
+    """
+    if process_video_for_prediction is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Video CV pipeline not available on this server",
+        )
+
+    _validate_video_content_type(file)
+    tmp_dir = tempfile.mkdtemp(prefix="api_emotion_upload_")
+    tmp_path = Path(tmp_dir) / file.filename
+    csv_path = None
+
+    try:
+        with open(tmp_path, "wb") as out:
+            content = await file.read()
+            out.write(content)
+
+        csv_path, video_err = process_video_for_prediction(
+            video_path=str(tmp_path),
+            output_dir=None,
+            sample_every=max(1, int(sample_every)),
+            use_emotions=True,
+        )
+        if video_err or not csv_path:
+            return {
+                "success": False,
+                "error": video_err or "Failed to compute video emotion features",
+            }
+
+        df = pd.read_csv(csv_path)
+        if "emotion" in df.columns:
+            emo = (
+                df["emotion"]
+                .fillna("unknown")
+                .astype(str)
+                .str.strip()
+                .str.lower()
+            )
+            emo = emo[emo != "unknown"]
+        else:
+            emo = pd.Series([], dtype=str)
+
+        distribution = {}
+        dominant_emotion = "unknown"
+        negative_ratio = 0.0
+        if len(emo) > 0:
+            counts = emo.value_counts(normalize=True)
+            distribution = {k: float(v) for k, v in counts.to_dict().items()}
+            dominant_emotion = str(counts.index[0])
+            negative_ratio = float(
+                distribution.get("sad", 0.0)
+                + distribution.get("angry", 0.0)
+                + distribution.get("fear", 0.0)
+                + distribution.get("disgust", 0.0)
+                + distribution.get("contempt", 0.0)
+            )
+
+        cv_audio_prob = None
+        cv_audio_ok = False
+        cv_audio_error = None
+        if predict_cv_audio is not None:
+            cv_audio_result = await run_in_threadpool(
+                predict_cv_audio,
+                str(tmp_path),
+                None,
+                0.5,
+                max(0.1, float(sample_rate)),
+            )
+            if isinstance(cv_audio_result, dict) and cv_audio_result.get("success"):
+                cv_audio_ok = True
+                cv_audio_prob = cv_audio_result.get("probability")
+            elif isinstance(cv_audio_result, dict):
+                cv_audio_error = cv_audio_result.get("error")
+
+        emotion_score = _clamp01(
+            0.70 * negative_ratio + 0.30 * float(cv_audio_prob if cv_audio_prob is not None else 0.0)
+        )
+        prediction = 1 if emotion_score >= 0.5 else 0
+
+        return {
+            "success": True,
+            "dominant_emotion": dominant_emotion,
+            "emotion_distribution": distribution,
+            "negative_ratio": negative_ratio,
+            "cv_audio_probability": float(cv_audio_prob) if cv_audio_prob is not None else None,
+            "cv_audio_success": cv_audio_ok,
+            "cv_audio_error": cv_audio_error,
+            "emotion_score": emotion_score,
+            "prediction": prediction,
+            "prediction_label": _prediction_label(prediction),
+            "risk_level": _risk_level_from_score(emotion_score),
+        }
+    finally:
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except Exception:
+            pass
+        try:
+            Path(tmp_dir).rmdir()
+        except Exception:
+            pass
+        _cleanup_temp_csv(csv_path)
+
+
+@app.post("/test/anomaly/text")
+async def test_anomaly_text(
+    file: UploadFile = File(...),
+    skip_transcription: bool = False,
+    label: int | None = None,
+):
+    try:
+        result = await _analyze_uploaded_video(
+            file=file,
+            skip_transcription=skip_transcription,
+            label=label,
+            include_cv=False,
+            include_cv_audio=False,
+            whisper_model="small",
+        )
+        raw = result.get("raw_result", result)
+        segments = raw.get("segments", []) if isinstance(raw, dict) else []
+        texts = [str(s.get("text", "")).strip() for s in segments if str(s.get("text", "")).strip()]
+        full_text = " ".join(texts)
+
+        import re
+
+        tokens = re.findall(r"\w+", full_text.lower())
+        word_count = len(tokens)
+        unique_count = len(set(tokens))
+        lexical_diversity = (unique_count / word_count) if word_count > 0 else 0.0
+        repetition_ratio = 1.0 - lexical_diversity if word_count > 0 else 1.0
+        punct_count = len(re.findall(r"[!?.,;:]", full_text))
+        punct_ratio = punct_count / max(1, len(full_text))
+        short_text_flag = 1.0 if word_count < 25 else 0.0
+
+        anomaly_score = _clamp01(
+            0.55 * repetition_ratio + 0.25 * short_text_flag + 0.20 * min(1.0, punct_ratio * 4.0)
+        )
+        prediction = 1 if anomaly_score >= 0.6 else 0
+
+        return {
+            "success": True,
+            "modality": "text",
+            "anomaly_score": anomaly_score,
+            "prediction": prediction,
+            "prediction_label": "anomaly" if prediction == 1 else "normal",
+            "risk_level": _risk_level_from_score(anomaly_score),
+            "metrics": {
+                "word_count": word_count,
+                "unique_words": unique_count,
+                "lexical_diversity": lexical_diversity,
+                "repetition_ratio": repetition_ratio,
+                "punctuation_ratio": punct_ratio,
+            },
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"✗ /test/anomaly/text error: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Processing failed: {str(e)}",
+        )
+
+
+@app.post("/test/anomaly/audio")
+async def test_anomaly_audio(
+    file: UploadFile = File(...),
+    skip_transcription: bool = False,
+    label: int | None = None,
+):
+    try:
+        result = await _analyze_uploaded_video(
+            file=file,
+            skip_transcription=skip_transcription,
+            label=label,
+            include_cv=False,
+            include_cv_audio=False,
+            whisper_model="small",
+        )
+        raw = result.get("raw_result", result)
+        segments = raw.get("segments", []) if isinstance(raw, dict) else []
+
+        scores = []
+        durations = []
+        time_series = []
+        for seg in segments:
+            score = seg.get("risk_score")
+            if score is None:
+                continue
+            start, end, duration = _segment_bounds(seg)
+            scores.append(float(score))
+            durations.append(float(duration))
+            time_series.append({"start": start, "end": end, "duration": duration, "score": float(score)})
+
+        if not scores:
+            return {
+                "success": False,
+                "modality": "audio",
+                "anomaly_score": None,
+                "prediction": None,
+                "prediction_label": None,
+                "risk_level": None,
+                "time_series": [],
+                "error": "No audio segment scores available",
+            }
+
+        arr_scores = np.array(scores, dtype=float)
+        arr_dur = np.array(durations, dtype=float) if durations else np.array([0.0], dtype=float)
+        score_std = float(np.std(arr_scores)) if len(arr_scores) > 1 else 0.0
+        duration_cv = float(np.std(arr_dur) / max(1e-6, np.mean(arr_dur)))
+        jump_ratio = (
+            float(np.mean(np.abs(np.diff(arr_scores)) > 0.35)) if len(arr_scores) > 1 else 0.0
+        )
+        low_segments_flag = 1.0 if len(arr_scores) < 3 else 0.0
+
+        anomaly_score = _clamp01(
+            0.40 * score_std + 0.30 * min(1.0, duration_cv) + 0.20 * jump_ratio + 0.10 * low_segments_flag
+        )
+        prediction = 1 if anomaly_score >= 0.6 else 0
+
+        return {
+            "success": True,
+            "modality": "audio",
+            "anomaly_score": anomaly_score,
+            "prediction": prediction,
+            "prediction_label": "anomaly" if prediction == 1 else "normal",
+            "risk_level": _risk_level_from_score(anomaly_score),
+            "time_series": time_series,
+            "metrics": {
+                "segments_used": len(arr_scores),
+                "score_std": score_std,
+                "duration_cv": duration_cv,
+                "jump_ratio": jump_ratio,
+            },
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"✗ /test/anomaly/audio error: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Processing failed: {str(e)}",
+        )
+
+
+@app.post("/test/anomaly/video")
+async def test_anomaly_video(
+    file: UploadFile = File(...),
+    sample_every: int = 8,
+):
+    if process_video_for_prediction is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Video CV pipeline not available on this server",
+        )
+
+    _validate_video_content_type(file)
+    tmp_dir = tempfile.mkdtemp(prefix="api_anom_video_upload_")
+    tmp_path = Path(tmp_dir) / file.filename
+    csv_path = None
+
+    try:
+        with open(tmp_path, "wb") as out:
+            content = await file.read()
+            out.write(content)
+
+        csv_path, video_err = process_video_for_prediction(
+            video_path=str(tmp_path),
+            output_dir=None,
+            sample_every=max(1, int(sample_every)),
+            use_emotions=None,
+        )
+        if video_err or not csv_path:
+            return {
+                "success": True,
+                "modality": "video",
+                "anomaly_score": 1.0,
+                "prediction": 1,
+                "prediction_label": "anomaly",
+                "risk_level": "high",
+                "reason": video_err or "Video features were not produced",
+            }
+
+        df = pd.read_csv(csv_path)
+        indicators = {}
+
+        def col_max_gt(col: str, threshold: float) -> float:
+            if col not in df.columns:
+                return 0.0
+            return float(df[col].fillna(0.0).max() > threshold)
+
+        def col_mean_lt(col: str, threshold: float) -> float:
+            if col not in df.columns:
+                return 0.0
+            return float(df[col].fillna(0.0).mean() < threshold)
+
+        indicators["gaze_avoidance"] = col_max_gt("gaze_away_time", 5.0)
+        indicators["head_down_long"] = col_max_gt("head_down_duration", 3.0)
+        indicators["instability"] = col_mean_lt("head_stability", 0.5)
+        indicators["face_touching"] = col_max_gt("face_touch_count", 3.0)
+        indicators["blinking_spikes"] = col_max_gt("blink_count", 20.0)
+
+        rule_score = float(np.mean(list(indicators.values()))) if indicators else 0.0
+
+        cv_prob = None
+        if predict_with_video_model is not None:
+            cv_result = predict_with_video_model(video_csv_path=csv_path, model_path=None, threshold=0.6)
+            if cv_result.get("success") and cv_result.get("probability") is not None:
+                cv_prob = float(cv_result["probability"])
+
+        anomaly_score = _clamp01(0.70 * rule_score + 0.30 * float(cv_prob if cv_prob is not None else 0.0))
+        prediction = 1 if anomaly_score >= 0.6 else 0
+
+        return {
+            "success": True,
+            "modality": "video",
+            "anomaly_score": anomaly_score,
+            "prediction": prediction,
+            "prediction_label": "anomaly" if prediction == 1 else "normal",
+            "risk_level": _risk_level_from_score(anomaly_score),
+            "cv_probability": cv_prob,
+            "indicators": indicators,
+        }
+    finally:
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except Exception:
+            pass
+        try:
+            Path(tmp_dir).rmdir()
+        except Exception:
+            pass
+        _cleanup_temp_csv(csv_path)
 
 
 if __name__ == "__main__":

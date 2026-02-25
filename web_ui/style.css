@@ -7,7 +7,8 @@ h1{margin:0 0 16px;font-size:20px}
 .controls{display:flex;flex-direction:column;gap:12px;margin-bottom:12px}
 .file-label{display:inline-block;padding:8px 12px;background:var(--card);border-radius:8px;border:1px solid #e5e7eb}
 input[type=file]{margin-left:8px}
-.options label{margin-right:12px;color:var(--muted)}
+.options{display:flex;flex-wrap:wrap;gap:8px 14px}
+.options label{margin-right:0;color:var(--muted)}
 .buttons{margin-top:8px}
 button{background:var(--accent);color:white;border:none;padding:8px 12px;border-radius:8px;cursor:pointer}
 #clearBtn{background:#6b7280;margin-left:8px}

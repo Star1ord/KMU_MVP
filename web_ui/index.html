@@ -9,17 +9,23 @@
 </head>
 <body>
   <div class="container">
-    <h1>Inference Demo — Upload Video</h1>
+    <h1>Inference Demo - Upload Video</h1>
 
     <div class="controls">
       <label class="file-label">Выберите видео
-        <input id="videoInput" type="file" accept="video/*"> 
+        <input id="videoInput" type="file" accept="video/*">
       </label>
 
       <div class="options">
-        <label><input type="radio" name="mode" value="all" checked> Все модели (NLP + CV+Audio)</label>
+        <label><input type="radio" name="mode" value="all" checked> Все модели (NLP + CV + CV+Audio)</label>
         <label><input type="radio" name="mode" value="nlp"> Только NLP</label>
+        <label><input type="radio" name="mode" value="cv"> Только CV</label>
         <label><input type="radio" name="mode" value="cv_audio"> Только CV+Audio</label>
+        <label><input type="radio" name="mode" value="deception"> 4. Deception detection</label>
+        <label><input type="radio" name="mode" value="emotion_av"> 5. Emotion audio+video</label>
+        <label><input type="radio" name="mode" value="anomaly_audio"> 6. Anomaly audio</label>
+        <label><input type="radio" name="mode" value="anomaly_video"> 6. Anomaly video</label>
+        <label><input type="radio" name="mode" value="anomaly_text"> 6. Anomaly text</label>
       </div>
 
       <div class="buttons">
@@ -28,7 +34,7 @@
       </div>
     </div>
 
-    <div id="status" class="status">Готов.</div>
+    <div id="status" class="status">Готово.</div>
 
     <div id="resultArea" class="result-area">
       <div id="textResult" class="text-result"></div>

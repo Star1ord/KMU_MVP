@@ -47,6 +47,9 @@ def analyze_new_media_file(
     whisper_model: str = 'medium',
     skip_transcription: bool = False,
     skip_video: bool = False,
+    skip_cv_audio: bool = False,
+    video_sample_every: int = 8,
+    cv_audio_sample_rate: float = 0.25,
 ) -> Dict:
     """
     Analyze a single media file and return predictions
@@ -79,6 +82,7 @@ def analyze_new_media_file(
         'features_csv': None,
         'error': None,
         'video_result': None,
+        'cv_audio_result': None,
         'ensemble_result': None
     }
     
@@ -211,7 +215,7 @@ def analyze_new_media_file(
                 video_csv_path, video_error = process_video_for_prediction(
                     video_path=str(media_file),
                     output_dir=None,
-                    sample_every=3,
+                    sample_every=max(1, int(video_sample_every)),
                     use_emotions=None
                 )
 
@@ -240,7 +244,7 @@ def analyze_new_media_file(
                 traceback.print_exc()
 
         # CV+Audio processing (if available and input is video) — keep this even when skip_video=True
-        if CV_AUDIO_AVAILABLE and is_video:
+        if CV_AUDIO_AVAILABLE and is_video and not skip_cv_audio:
             print(f"\n{'='*80}")
             print("CV+AUDIO PROCESSING")
             print(f"{'='*80}")
@@ -250,7 +254,7 @@ def analyze_new_media_file(
                     video_path=str(media_file),
                     model_path=None,
                     threshold=0.5,
-                    sample_rate=1.0,
+                    sample_rate=float(cv_audio_sample_rate),
                 )
 
                 if cv_audio_pred_result.get('success'):
@@ -687,6 +691,19 @@ def analyze_new_media_file(
         else:
             models_summary['cv_audio'] = None
 
+        # CV model (video-only)
+        if result.get('video_result'):
+            v = result['video_result']
+            models_summary['cv'] = {
+                'success': bool(v.get('success', False)),
+                'prediction': int(v.get('prediction')) if v.get('prediction') is not None else None,
+                'risk_level': v.get('risk_level'),
+                'probability': float(v.get('probability')) if v.get('probability') is not None else None,
+                'error': v.get('error')
+            }
+        else:
+            models_summary['cv'] = None
+
         # Overall / ensemble summary
         overall = {
             'success': bool(result.get('success', False)),
@@ -836,4 +853,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
