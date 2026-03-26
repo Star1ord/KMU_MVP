@@ -7,7 +7,7 @@
   <meta http-equiv="Pragma" content="no-cache" />
   <meta http-equiv="Expires" content="0" />
   <title>Multimodal Suicide Risk Classification System</title>
-  <link rel="stylesheet" href="style.css?v=20260311-2">
+  <link rel="stylesheet" href="style.css?v=20260326-1">
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 <body>
@@ -26,7 +26,6 @@
       <a href="#video-markers">Video Markers</a>
       <a href="#audio-text">Audio & Text</a>
       <a href="#model-metrics">Model Metrics</a>
-      <a href="#control-comparison">Control Comparison</a>
     </nav>
     <button id="jumpAnalyzeBtn" class="btn btn-ghost">Get Started</button>
   </header>
@@ -69,7 +68,10 @@
         </article>
 
         <article class="panel stream-panel">
-          <h3>Live Data Stream</h3>
+          <div class="panel-head">
+            <h3>Live Data Stream</h3>
+            <span id="pipelineSpinner" class="pipeline-spinner" aria-hidden="true"></span>
+          </div>
           <div id="pipelineStage" class="pipeline-stage">Idle</div>
           <div class="pipeline-bar-wrap"><span id="pipelineBar" class="pipeline-bar"></span></div>
           <div class="stream-graph">
@@ -107,7 +109,14 @@
     <section id="video-markers" class="section">
       <h2>Multimodal Marker Interpretation - Video (CV)</h2>
       <article class="panel">
-        <canvas id="videoTimelineChart" height="130"></canvas>
+        <div class="panel-head">
+          <h3>Visual Risk Timeline</h3>
+          <span id="videoTimelineHint" class="small-note">Awaiting CV markers.</span>
+        </div>
+        <div class="chart-wrap chart-wrap-video">
+          <canvas id="videoTimelineChart" height="130"></canvas>
+        </div>
+        <div id="videoFrameStrip" class="frame-strip empty-note">Run analysis to generate key frame previews.</div>
         <div id="videoMarkerList" class="marker-list empty-note">Run analysis to see marker signals.</div>
       </article>
     </section>
@@ -171,15 +180,6 @@
         </article>
       </div>
     </section>
-
-    <section id="control-comparison" class="section">
-      <h2>Control Group Comparison</h2>
-      <article class="panel chart-panel">
-        <div class="chart-wrap chart-wrap-control">
-          <canvas id="controlChart" height="190"></canvas>
-        </div>
-      </article>
-    </section>
   </main>
 
   <footer class="site-footer">
@@ -190,7 +190,6 @@
       <a href="#video-markers">Video Markers</a>
       <a href="#audio-text">Audio & Text</a>
       <a href="#model-metrics">Model Metrics</a>
-      <a href="#control-comparison">Control Comparison</a>
     </div>
     <div class="footer-meta">
       <div>
@@ -209,7 +208,7 @@
     <div class="copyright">Copyright � 2026</div>
   </footer>
 
-  <script src="app.js?v=20260311-2"></script>
+  <script src="app.js?v=20260326-1"></script>
 </body>
 </html>
 

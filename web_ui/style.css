@@ -188,6 +188,7 @@ a {
   display: grid;
   grid-template-columns: 330px 1fr 300px;
   gap: 14px;
+  align-items: start;
 }
 
 .file-picker {
@@ -281,12 +282,25 @@ a {
   color: #bbf7d0;
 }
 
+.preview-panel {
+  align-self: start;
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  overflow: hidden;
+}
+
 .preview-panel video {
   width: 100%;
-  min-height: 260px;
+  height: clamp(220px, 28vw, 320px) !important;
+  min-height: 220px;
+  max-height: 320px;
   border-radius: 12px;
   background: linear-gradient(180deg, #0a1f3e, #040912);
   border: 1px solid rgba(131, 176, 247, 0.2);
+  aspect-ratio: 16 / 9;
+  object-fit: cover;
+  object-position: center 20%;
 }
 
 .panel-head {
@@ -308,6 +322,21 @@ a {
 
 .stream-panel {
   overflow: hidden;
+}
+
+.pipeline-spinner {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid rgba(121, 171, 245, 0.25);
+  border-top-color: #57d0c9;
+  opacity: 0.35;
+  transform: scale(0.9);
+}
+
+.pipeline-spinner.is-active {
+  opacity: 1;
+  animation: spin 0.8s linear infinite;
 }
 
 .pipeline-stage {
@@ -401,6 +430,11 @@ a {
   0% { transform: scale(1); opacity: 0.85; }
   50% { transform: scale(1.04); opacity: 1; }
   100% { transform: scale(1); opacity: 0.85; }
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
 }
 
 .overview-grid {
@@ -507,6 +541,17 @@ a {
   height: 220px !important;
 }
 
+.chart-wrap-video {
+  min-height: 170px;
+  height: 170px;
+  max-height: 170px;
+}
+
+.chart-wrap-video canvas {
+  display: block;
+  height: 170px !important;
+}
+
 .chart-wrap-metrics {
   min-height: 220px;
   height: 220px;
@@ -516,17 +561,6 @@ a {
 .chart-wrap-metrics canvas {
   display: block;
   height: 220px !important;
-}
-
-.chart-wrap-control {
-  min-height: 240px;
-  height: 240px;
-  max-height: 240px;
-}
-
-.chart-wrap-control canvas {
-  display: block;
-  height: 240px !important;
 }
 
 .chart-wrap canvas,
@@ -588,6 +622,37 @@ canvas {
   margin-top: 10px;
   display: grid;
   gap: 8px;
+}
+
+.frame-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.frame-strip.empty-note {
+  display: block;
+}
+
+.frame-card {
+  overflow: hidden;
+  border-radius: 12px;
+  border: 1px solid rgba(118, 164, 235, 0.24);
+  background: rgba(10, 27, 56, 0.65);
+}
+
+.frame-card img {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  object-fit: cover;
+  border-bottom: 1px solid rgba(118, 164, 235, 0.18);
+}
+
+.frame-caption {
+  padding: 8px 10px 10px;
+  font-size: 12px;
+  color: #d6e6ff;
 }
 
 .marker-item {

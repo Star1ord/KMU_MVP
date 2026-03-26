@@ -78,6 +78,9 @@ def analyze_new_media_file(
         'prediction': None,
         'risk_score': None,
         'risk_level': None,
+        'prediction_label': None,
+        'full_text': '',
+        'transcript': '',
         'segments': [],
         'features_csv': None,
         'error': None,
@@ -313,6 +316,7 @@ def analyze_new_media_file(
             if video_result and video_result['success']:
                 result['success'] = True
                 result['prediction'] = video_result['prediction']
+                result['prediction_label'] = video_result.get('prediction_label')
                 result['risk_score'] = video_result['probability']
                 result['risk_level'] = video_result['risk_level']
                 result['video_result'] = video_result
@@ -474,6 +478,9 @@ def analyze_new_media_file(
             result['prediction'] = final_prediction
             result['risk_score'] = float(p_final)
             result['risk_level'] = 'high' if p_final >= 0.6 else 'medium' if p_final >= 0.3 else 'low'
+            result['prediction_label'] = 'experimental' if final_prediction == 1 else 'control'
+            result['full_text'] = full_text
+            result['transcript'] = full_text
             
             # Если видео уже обработано ранее, создаем ансамблевое предсказание
             # Собираем все доступные результаты моделей
@@ -670,12 +677,20 @@ def analyze_new_media_file(
 
         # Per-model summaries
         models_summary = {}
+        nlp_prediction = result.get('prediction')
+        nlp_prediction_label = result.get('prediction_label')
+        if nlp_prediction_label is None and nlp_prediction is not None:
+            nlp_prediction_label = 'experimental' if int(nlp_prediction) == 1 else 'control'
+
         # NLP / audio model (nlp) is represented by top-level prediction/risk_score
         models_summary['nlp'] = {
             'success': bool(result.get('success', False)),
-            'prediction': int(result.get('prediction')) if result.get('prediction') is not None else None,
+            'prediction': int(nlp_prediction) if nlp_prediction is not None else None,
+            'prediction_label': nlp_prediction_label,
             'risk_level': result.get('risk_level'),
-            'probability': float(result.get('risk_score')) if result.get('risk_score') is not None else None
+            'probability': float(result.get('risk_score')) if result.get('risk_score') is not None else None,
+            'transcript': result.get('transcript', ''),
+            'full_text': result.get('full_text', ''),
         }
 
         # CV+Audio model
@@ -684,8 +699,10 @@ def analyze_new_media_file(
             models_summary['cv_audio'] = {
                 'success': bool(cv.get('success', False)),
                 'prediction': int(cv.get('prediction')) if cv.get('prediction') is not None else None,
+                'prediction_label': cv.get('prediction_label'),
                 'risk_level': cv.get('risk_level'),
                 'probability': float(cv.get('probability')) if cv.get('probability') is not None else None,
+                'metrics': cv.get('metrics'),
                 'error': cv.get('error')
             }
         else:
@@ -697,8 +714,10 @@ def analyze_new_media_file(
             models_summary['cv'] = {
                 'success': bool(v.get('success', False)),
                 'prediction': int(v.get('prediction')) if v.get('prediction') is not None else None,
+                'prediction_label': v.get('prediction_label'),
                 'risk_level': v.get('risk_level'),
                 'probability': float(v.get('probability')) if v.get('probability') is not None else None,
+                'metrics': v.get('metrics'),
                 'error': v.get('error')
             }
         else:
@@ -707,7 +726,8 @@ def analyze_new_media_file(
         # Overall / ensemble summary
         overall = {
             'success': bool(result.get('success', False)),
-            'prediction': int(result.get('prediction')) if result.get('prediction') is not None else None,
+            'prediction': int(nlp_prediction) if nlp_prediction is not None else None,
+            'prediction_label': nlp_prediction_label,
             'risk_level': result.get('risk_level'),
             'risk_score': float(result.get('risk_score')) if result.get('risk_score') is not None else None,
             'ensemble': None
@@ -730,6 +750,9 @@ def analyze_new_media_file(
             'session_id': result.get('session_id'),
             'overall': overall,
             'models': models_summary,
+            'transcript': result.get('transcript', ''),
+            'full_text': result.get('full_text', ''),
+            'raw_text': result.get('full_text', ''),
             'segments': result.get('segments', []),
             'features_csv': result.get('features_csv'),
             'audio_path': result.get('audio_path'),

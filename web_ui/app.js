@@ -25,6 +25,8 @@ const statusCanvas = document.getElementById('statusChart')
 const distributionCanvas = document.getElementById('distributionChart')
 const controlCanvas = document.getElementById('controlChart')
 const videoTimelineCanvas = document.getElementById('videoTimelineChart')
+const videoTimelineHintEl = document.getElementById('videoTimelineHint')
+const videoFrameStripEl = document.getElementById('videoFrameStrip')
 const acousticRadarCanvas = document.getElementById('acousticRadarChart')
 const acousticTimelineCanvas = document.getElementById('acousticTimelineChart')
 const acousticTimelineHintEl = document.getElementById('acousticTimelineHint')
@@ -37,6 +39,7 @@ const influenceTableWrapEl = document.getElementById('influenceTableWrap')
 
 const pipelineStageEl = document.getElementById('pipelineStage')
 const pipelineBarEl = document.getElementById('pipelineBar')
+const pipelineSpinnerEl = document.getElementById('pipelineSpinner')
 const pipelineNodes = {
   input: document.getElementById('nodeInput'),
   prep: document.getElementById('nodePrep'),
@@ -62,6 +65,7 @@ let previewUrl = null
 let activeTermMap = new Map()
 let pipelineTimer = null
 let pipelineStepIndex = 0
+let frameRenderToken = 0
 
 const PIPELINE_STEPS = [
   { key: 'input', label: 'Input received', progress: 16 },
@@ -111,6 +115,7 @@ function resetPipelineState() {
     if(!node) return
     node.classList.remove('is-running', 'is-complete')
   })
+  pipelineSpinnerEl?.classList.remove('is-active')
 }
 
 function paintPipelineStep(stepIndex) {
@@ -134,6 +139,7 @@ function paintPipelineStep(stepIndex) {
 
 function startPipelineAnimation() {
   resetPipelineState()
+  pipelineSpinnerEl?.classList.add('is-active')
   paintPipelineStep(0)
   pipelineStepIndex = 1
   pipelineTimer = setInterval(() => {
@@ -150,6 +156,7 @@ function finishPipeline(success = true) {
     clearInterval(pipelineTimer)
     pipelineTimer = null
   }
+  pipelineSpinnerEl?.classList.remove('is-active')
 
   if(success){
     paintPipelineStep(PIPELINE_STEPS.length - 1)
@@ -177,7 +184,10 @@ function formatNumber(v) {
   if(v === null || v === undefined) return '-'
   const n = Number(v)
   if(Number.isNaN(n)) return String(v)
-  if(n !== 0 && Math.abs(n) < 0.001) return n.toExponential(3)
+  if(n !== 0 && Math.abs(n) < 0.001) {
+    const tiny = Math.round(n * 10000) / 10000
+    return tiny === 0 ? '0' : tiny.toFixed(4).replace(/0+$/, '').replace(/\.$/, '')
+  }
   return (Math.round(n * 1000) / 1000).toString()
 }
 
@@ -307,12 +317,59 @@ function pickOverallLevel(data, score) {
   return data?.overall?.ensemble?.risk_level || data?.overall?.risk_level || data?.risk_level || riskLevelFromScore(score)
 }
 
+function pickRecordScore(records, preferredNames = []) {
+  for(const name of preferredNames) {
+    const record = records.find(r => r?.name === name && r.score !== null && r.score !== undefined && !Number.isNaN(Number(r.score)))
+    if(record) return clamp01(Number(record.score))
+  }
+  return null
+}
+
+function getPreviewDurationSeconds() {
+  const duration = Number(previewVideo?.duration)
+  if(Number.isFinite(duration) && duration > 0) return duration
+  return 60
+}
+
+function buildFlatTimeline(score, points = 18) {
+  const safeScore = clamp01(score)
+  const duration = getPreviewDurationSeconds()
+  if(points <= 1) return [{ x: 0, y: safeScore }]
+  return Array.from({ length: points }, (_, index) => {
+    const ratio = index / (points - 1)
+    return { x: duration * ratio, y: safeScore }
+  })
+}
+
+function resolveTimeline(points, fallbackScore) {
+  if(Array.isArray(points) && points.length > 0) {
+    return { points, synthetic: false }
+  }
+  if(fallbackScore === null || fallbackScore === undefined || Number.isNaN(Number(fallbackScore))) {
+    return { points: [], synthetic: false }
+  }
+  return { points: buildFlatTimeline(fallbackScore), synthetic: true }
+}
+
 function destroyChart(key) {
   if(charts[key]) { charts[key].destroy(); charts[key] = null }
 }
 
 function clearCharts() {
   Object.keys(charts).forEach(destroyChart)
+}
+
+function getChartContext(canvas, chartName) {
+  if(!canvas) {
+    console.warn(`Canvas not found for ${chartName}`)
+    return null
+  }
+  const ctx = canvas.getContext('2d')
+  if(!ctx) {
+    console.warn(`2D context unavailable for ${chartName}`)
+    return null
+  }
+  return ctx
 }
 
 function baseChartOptions(extra = {}) {
@@ -351,7 +408,9 @@ function renderGauge(score) {
   destroyChart('gauge')
   const hasScore = score !== null && score !== undefined && !Number.isNaN(Number(score))
   const s = hasScore ? clamp01(score) : 0
-  charts.gauge = new Chart(riskGaugeCanvas.getContext('2d'), {
+  const ctx = getChartContext(riskGaugeCanvas, 'riskGaugeChart')
+  if(!ctx) return
+  charts.gauge = new Chart(ctx, {
     type: 'doughnut',
     data: { labels: ['Risk', 'Remaining'], datasets: [{ data: [s, Math.max(0, 1 - s)], backgroundColor: [colorByRisk(s), 'rgba(126, 154, 196, 0.22)'], borderWidth: 0, hoverOffset: 0 }] },
     options: { cutout: '78%', rotation: -90, circumference: 180, plugins: { legend: { display: false }, gaugeTextPlugin: { value: s } } }
@@ -385,8 +444,10 @@ function renderScoreChart(records) {
   destroyChart('score')
   const items = records.filter(r => r.score !== null && r.score !== undefined && !Number.isNaN(Number(r.score)))
   if(items.length === 0) return
+  const ctx = getChartContext(scoreCanvas, 'scoreChart')
+  if(!ctx) return
 
-  charts.score = new Chart(scoreCanvas.getContext('2d'), {
+  charts.score = new Chart(ctx, {
     type: 'bar',
     data: { labels: items.map(i => modelTitle(i.name)), datasets: [{ label: 'Score / Probability', data: items.map(i => Number(i.score)), backgroundColor: ['#4aa8ff', '#3ec3bb', '#22c55e', '#f59e0b', '#ef4444', '#8ab4ff'] }] },
     options: baseChartOptions({ plugins: { legend: { display: false } } })
@@ -399,8 +460,10 @@ function renderStatusChart(records) {
   records.forEach(r => { if(r.success === true) counts.ok += 1; else if(r.success === false) counts.fail += 1; else counts.unknown += 1 })
   const values = [counts.ok, counts.fail, counts.unknown]
   if(values.reduce((a, b) => a + b, 0) === 0) return
+  const ctx = getChartContext(statusCanvas, 'statusChart')
+  if(!ctx) return
 
-  charts.status = new Chart(statusCanvas.getContext('2d'), {
+  charts.status = new Chart(ctx, {
     type: 'doughnut',
     data: { labels: ['OK', 'Fail', 'Unknown'], datasets: [{ data: values, backgroundColor: ['#22c55e', '#ef4444', '#64748b'] }] },
     options: { maintainAspectRatio: false, plugins: { legend: { position: 'bottom', labels: { color: '#bfd2f2' } } } }
@@ -409,10 +472,12 @@ function renderStatusChart(records) {
 
 function renderDistributionChart(data, records) {
   destroyChart('distribution')
+  const ctx = getChartContext(distributionCanvas, 'distributionChart')
+  if(!ctx) return
 
   if(data?.emotion_distribution && Object.keys(data.emotion_distribution).length > 0) {
     const entries = Object.entries(data.emotion_distribution)
-    charts.distribution = new Chart(distributionCanvas.getContext('2d'), {
+    charts.distribution = new Chart(ctx, {
       type: 'pie',
       data: { labels: entries.map(([k]) => k), datasets: [{ data: entries.map(([, v]) => Number(v)), backgroundColor: ['#4aa8ff', '#22c55e', '#f59e0b', '#ef4444', '#57d0c9', '#8ab4ff'] }] },
       options: { maintainAspectRatio: false, plugins: { legend: { position: 'bottom', labels: { color: '#bfd2f2' } } } }
@@ -422,7 +487,7 @@ function renderDistributionChart(data, records) {
 
   if(data?.indicators && Object.keys(data.indicators).length > 0) {
     const entries = Object.entries(data.indicators)
-    charts.distribution = new Chart(distributionCanvas.getContext('2d'), {
+    charts.distribution = new Chart(ctx, {
       type: 'bar',
       data: { labels: entries.map(([k]) => k), datasets: [{ data: entries.map(([, v]) => Number(v)), backgroundColor: '#57d0c9' }] },
       options: baseChartOptions({ plugins: { legend: { display: false } } })
@@ -432,7 +497,7 @@ function renderDistributionChart(data, records) {
 
   if(data?.components && Object.keys(data.components).length > 0) {
     const entries = Object.entries(data.components)
-    charts.distribution = new Chart(distributionCanvas.getContext('2d'), {
+    charts.distribution = new Chart(ctx, {
       type: 'radar',
       data: { labels: entries.map(([k]) => k), datasets: [{ label: 'Components', data: entries.map(([, v]) => Number(v)), borderColor: '#4aa8ff', backgroundColor: 'rgba(74, 168, 255, 0.22)' }] },
       options: { maintainAspectRatio: false, scales: { r: { beginAtZero: true, max: 1, grid: { color: 'rgba(122, 165, 231, 0.2)' }, angleLines: { color: 'rgba(122, 165, 231, 0.2)' }, pointLabels: { color: '#bfd2f2' }, ticks: { color: '#9eb7dc', backdropColor: 'transparent' } } }, plugins: { legend: { labels: { color: '#bfd2f2' } } } }
@@ -442,32 +507,57 @@ function renderDistributionChart(data, records) {
 
   if(data?.overall?.ensemble?.individual_scores) {
     const entries = Object.entries(data.overall.ensemble.individual_scores)
-    charts.distribution = new Chart(distributionCanvas.getContext('2d'), {
+    charts.distribution = new Chart(ctx, {
       type: 'polarArea',
       data: { labels: entries.map(([k]) => modelTitle(k)), datasets: [{ data: entries.map(([, v]) => Number(v)), backgroundColor: ['#4aa8ff', '#22c55e', '#f59e0b', '#ef4444', '#57d0c9'] }] },
-      options: { maintainAspectRatio: false, plugins: { legend: { position: 'bottom', labels: { color: '#bfd2f2' } } } }
+      options: {
+        maintainAspectRatio: false,
+        scales: {
+          r: {
+            ticks: { display: false },
+            grid: { display: false },
+            angleLines: { display: false },
+            pointLabels: { display: false }
+          }
+        },
+        plugins: { legend: { position: 'bottom', labels: { color: '#bfd2f2' } } }
+      }
     })
     return
   }
 
   const items = records.filter(r => r.score !== null && r.score !== undefined && !Number.isNaN(Number(r.score)))
   if(items.length === 0) return
-  charts.distribution = new Chart(distributionCanvas.getContext('2d'), {
+  charts.distribution = new Chart(ctx, {
     type: 'doughnut',
     data: { labels: items.map(r => modelTitle(r.name)), datasets: [{ data: items.map(r => Number(r.score)), backgroundColor: ['#4aa8ff', '#57d0c9', '#22c55e', '#f59e0b', '#ef4444'] }] },
     options: { maintainAspectRatio: false, plugins: { legend: { position: 'bottom', labels: { color: '#bfd2f2' } } } }
   })
 }
 
-function renderVideoTimelineChart(timeline) {
+function renderVideoTimelineChart(timelineState) {
   destroyChart('videoTimeline')
-  if(!timeline || timeline.length === 0) return
+  const timeline = timelineState?.points || []
+  if(!timeline || timeline.length === 0) {
+    if(videoTimelineHintEl) videoTimelineHintEl.textContent = 'No CV timeline available for this mode.'
+    return
+  }
 
   const sorted = timeline.map(p => ({ x: Number(p.x), y: Number(p.y) })).filter(p => !Number.isNaN(p.x) && !Number.isNaN(p.y)).sort((a, b) => a.x - b.x)
-  if(sorted.length === 0) return
+  if(sorted.length === 0) {
+    if(videoTimelineHintEl) videoTimelineHintEl.textContent = 'CV timeline data is empty after filtering.'
+    return
+  }
   const compact = downsampleTimeline(sorted, 150)
+  if(videoTimelineHintEl) {
+    videoTimelineHintEl.textContent = timelineState?.synthetic
+      ? 'Showing a model-level fallback line because frame-by-frame CV markers are unavailable.'
+      : `Showing ${compact.length} timeline points.`
+  }
+  const ctx = getChartContext(videoTimelineCanvas, 'videoTimelineChart')
+  if(!ctx) return
 
-  charts.videoTimeline = new Chart(videoTimelineCanvas.getContext('2d'), {
+  charts.videoTimeline = new Chart(ctx, {
     type: 'line',
     data: {
       datasets: [{
@@ -534,6 +624,157 @@ function renderVideoMarkers(data, timeline, records) {
   videoMarkerListEl.className = 'marker-list'
   videoMarkerListEl.innerHTML = items.map(item => `<div class="marker-item"><b>${escapeHtml(item.title)}</b> | Score: ${escapeHtml(formatNumber(item.score))}<div>${escapeHtml(item.note)}</div></div>`).join('')
 }
+
+function setVideoFrameStripMessage(text) {
+  if(!videoFrameStripEl) return
+  videoFrameStripEl.className = 'frame-strip empty-note'
+  videoFrameStripEl.textContent = text
+}
+
+function extractFrameCaptureTimes(data, timeline) {
+  const duration = getPreviewDurationSeconds()
+  const candidates = []
+  const segments = Array.isArray(data?.segments) ? data.segments : []
+
+  segments
+    .filter(seg => seg && (seg.start_time !== undefined || seg.start !== undefined))
+    .sort((a, b) => Number(b.risk_score || 0) - Number(a.risk_score || 0))
+    .slice(0, 4)
+    .forEach(seg => {
+      const start = Number(seg.start_time ?? seg.start ?? 0)
+      const end = Number(seg.end_time ?? seg.end ?? start)
+      candidates.push((start + Math.max(start, end)) / 2)
+    })
+
+  ;[...timeline]
+    .sort((a, b) => Number(b.y || 0) - Number(a.y || 0))
+    .slice(0, 4)
+    .forEach(point => candidates.push(Number(point.x)))
+
+  if(candidates.length === 0) {
+    ;[0.16, 0.38, 0.62, 0.84].forEach(ratio => candidates.push(duration * ratio))
+  }
+
+  const seen = new Set()
+  return candidates
+    .map(time => Math.max(0, Math.min(duration, Number(time) || 0)))
+    .filter(time => {
+      const key = time.toFixed(2)
+      if(seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+    .slice(0, 4)
+}
+
+function nearestTimelineScore(timeline, targetX) {
+  if(!timeline?.length) return null
+  let closest = timeline[0]
+  let minDistance = Math.abs(Number(closest.x) - targetX)
+  timeline.forEach(point => {
+    const distance = Math.abs(Number(point.x) - targetX)
+    if(distance < minDistance) {
+      closest = point
+      minDistance = distance
+    }
+  })
+  return closest?.y ?? null
+}
+
+async function seekVideoFrame(video, targetTime) {
+  const maxTime = Math.max(0, (Number(video.duration) || 0) - 0.05)
+  const safeTime = Math.max(0, Math.min(targetTime, maxTime))
+  if(Math.abs(video.currentTime - safeTime) < 0.02) return
+
+  await new Promise((resolve, reject) => {
+    const cleanup = () => {
+      video.removeEventListener('seeked', onSeeked)
+      video.removeEventListener('error', onError)
+    }
+    const onSeeked = () => { cleanup(); resolve() }
+    const onError = () => { cleanup(); reject(new Error('Failed to seek preview video.')) }
+    video.addEventListener('seeked', onSeeked)
+    video.addEventListener('error', onError)
+    video.currentTime = safeTime
+  })
+}
+
+async function renderVideoFrames(data, timeline) {
+  if(!videoFrameStripEl) return
+
+  const currentToken = ++frameRenderToken
+  if(!previewUrl) {
+    setVideoFrameStripMessage('Upload a video to preview key frames.')
+    return
+  }
+
+  videoFrameStripEl.className = 'frame-strip'
+  videoFrameStripEl.innerHTML = '<div class="empty-note">Generating key frame previews...</div>'
+
+  const scratch = document.createElement('video')
+  scratch.preload = 'auto'
+  scratch.muted = true
+  scratch.playsInline = true
+  scratch.src = previewUrl
+  scratch.load()
+
+  try {
+    if(scratch.readyState < 1) {
+      await new Promise((resolve, reject) => {
+        const cleanup = () => {
+          scratch.removeEventListener('loadedmetadata', onReady)
+          scratch.removeEventListener('error', onError)
+        }
+        const onReady = () => { cleanup(); resolve() }
+        const onError = () => { cleanup(); reject(new Error('Preview metadata unavailable.')) }
+        scratch.addEventListener('loadedmetadata', onReady)
+        scratch.addEventListener('error', onError)
+      })
+    }
+
+    const frameTimes = extractFrameCaptureTimes(data, timeline)
+    const canvas = document.createElement('canvas')
+    canvas.width = 320
+    canvas.height = 180
+    const ctx = canvas.getContext('2d')
+    if(!ctx) {
+      setVideoFrameStripMessage('Key frame preview is unavailable for this file.')
+      return
+    }
+    const frames = []
+
+    for(const time of frameTimes) {
+      if(currentToken !== frameRenderToken) return
+      await seekVideoFrame(scratch, time)
+      ctx.drawImage(scratch, 0, 0, canvas.width, canvas.height)
+      frames.push({
+        image: canvas.toDataURL('image/jpeg', 0.82),
+        time,
+        score: nearestTimelineScore(timeline, time),
+      })
+    }
+
+    if(currentToken !== frameRenderToken) return
+    if(frames.length === 0) {
+      setVideoFrameStripMessage('Key frame preview is unavailable for this file.')
+      return
+    }
+
+    videoFrameStripEl.className = 'frame-strip'
+    videoFrameStripEl.innerHTML = frames.map(frame => `
+      <div class="frame-card">
+        <img src="${frame.image}" alt="Video frame at ${escapeHtml(formatTime(frame.time))}">
+        <div class="frame-caption">
+          <b>${escapeHtml(formatTime(frame.time))}</b>${frame.score !== null ? ` | score ${escapeHtml(formatNumber(frame.score))}` : ''}
+        </div>
+      </div>
+    `).join('')
+  } catch {
+    if(currentToken !== frameRenderToken) return
+    setVideoFrameStripMessage('Key frame preview is unavailable for this file.')
+  }
+}
+
 function buildAcousticProfile(data, timeline, records) {
   const metrics = data?.metrics && typeof data.metrics === 'object' ? data.metrics : {}
   const segments = Array.isArray(data?.segments) ? data.segments : []
@@ -580,7 +821,9 @@ function buildAcousticProfile(data, timeline, records) {
 
 function renderAcousticRadar(profileData) {
   destroyChart('acousticRadar')
-  charts.acousticRadar = new Chart(acousticRadarCanvas.getContext('2d'), {
+  const ctx = getChartContext(acousticRadarCanvas, 'acousticRadarChart')
+  if(!ctx) return
+  charts.acousticRadar = new Chart(ctx, {
     type: 'radar',
     data: { labels: profileData.labels, datasets: [{ label: 'Acoustic profile', data: profileData.values, borderColor: '#57d0c9', backgroundColor: 'rgba(87, 208, 201, 0.22)', pointBackgroundColor: '#57d0c9' }] },
     options: { maintainAspectRatio: false, scales: { r: { min: 0, max: 1, grid: { color: 'rgba(122, 165, 231, 0.2)' }, angleLines: { color: 'rgba(122, 165, 231, 0.2)' }, ticks: { color: '#9eb7dc', backdropColor: 'transparent' }, pointLabels: { color: '#bfd2f2' } } }, plugins: { legend: { display: false } } }
@@ -597,8 +840,9 @@ function renderAcousticInsights(insights) {
   })
 }
 
-function renderAcousticTimeline(timeline) {
+function renderAcousticTimeline(timelineState) {
   destroyChart('acousticTimeline')
+  const timeline = timelineState?.points || []
   if(!timeline || timeline.length === 0) {
     acousticTimelineHintEl.textContent = 'No timeline points for this mode.'
     return
@@ -614,11 +858,15 @@ function renderAcousticTimeline(timeline) {
   }
 
   const compact = downsampleTimeline(sorted, 140)
-  acousticTimelineHintEl.textContent = compact.length < sorted.length
-    ? `Showing ${compact.length} of ${sorted.length} points for readability.`
-    : `Showing ${compact.length} points.`
+  acousticTimelineHintEl.textContent = timelineState?.synthetic
+    ? 'Showing a model-level fallback line because segment-level acoustic dynamics are unavailable.'
+    : compact.length < sorted.length
+      ? `Showing ${compact.length} of ${sorted.length} points for readability.`
+      : `Showing ${compact.length} points.`
+  const ctx = getChartContext(acousticTimelineCanvas, 'acousticTimelineChart')
+  if(!ctx) return
 
-  charts.acousticTimeline = new Chart(acousticTimelineCanvas.getContext('2d'), {
+  charts.acousticTimeline = new Chart(ctx, {
     type: 'line',
     data: {
       datasets: [{
@@ -680,15 +928,20 @@ function buildTextPayload(data, rawPayload, overallScore) {
   const lines = []
   if(segments.length) segments.forEach(seg => { const text = String(seg?.text || '').trim(); if(text) lines.push(text) })
   if(lines.length === 0){
+    const seenTexts = new Set()
     const textCandidates = [
       data?.raw_text,
       data?.transcript,
       data?.full_text,
       data?.text,
+      data?.models?.nlp?.transcript,
+      data?.models?.nlp?.full_text,
       rawPayload?.raw_text,
       rawPayload?.transcript,
       rawPayload?.full_text,
       rawPayload?.text,
+      rawPayload?.models?.nlp?.transcript,
+      rawPayload?.models?.nlp?.full_text,
       rawPayload?.raw_result?.raw_text,
       rawPayload?.raw_result?.transcript,
       rawPayload?.raw_result?.full_text,
@@ -701,7 +954,10 @@ function buildTextPayload(data, rawPayload, overallScore) {
 
     textCandidates.forEach(candidate => {
       if(typeof candidate === 'string' && candidate.trim()){
-        lines.push(candidate.trim())
+        const clean = candidate.trim()
+        if(seenTexts.has(clean)) return
+        seenTexts.add(clean)
+        lines.push(clean)
       }
     })
   }
@@ -796,12 +1052,15 @@ function renderInfluenceTable(data) {
 }
 
 function renderControlChart(records, data) {
+  if(!controlCanvas) return
   destroyChart('control')
   const subjectScore = clamp01(pickOverallRisk(data, records) ?? 0)
   const nonEnsemble = records.filter(r => r.name !== 'ensemble' && r.score !== null && r.score !== undefined).map(r => Number(r.score)).filter(v => !Number.isNaN(v))
   const controlScore = nonEnsemble.length ? clamp01(avg(nonEnsemble)) : clamp01(Math.max(0.25, 1 - subjectScore * 0.8))
+  const ctx = getChartContext(controlCanvas, 'controlChart')
+  if(!ctx) return
 
-  charts.control = new Chart(controlCanvas.getContext('2d'), {
+  charts.control = new Chart(ctx, {
     type: 'bar',
     data: { labels: ['Subject', 'Control'], datasets: [{ label: 'Subject profile', data: [subjectScore, null], backgroundColor: '#4a83ff' }, { label: 'Anonymized control', data: [null, controlScore], backgroundColor: '#f2b24a' }] },
     options: baseChartOptions({ plugins: { legend: { position: 'top', labels: { color: '#bfd2f2' } } } })
@@ -812,6 +1071,8 @@ function renderAll(data, modeCfg, rawPayload) {
   const timeline = extractTimeline(data)
   const score = pickOverallRisk(data, records)
   const level = pickOverallLevel(data, score)
+  const videoTimeline = resolveTimeline(timeline, pickRecordScore(records, ['cv', 'video', 'ensemble']) ?? score)
+  const acousticTimeline = resolveTimeline(timeline, pickRecordScore(records, ['cv_audio', 'nlp', 'ensemble']) ?? score)
 
   renderGauge(score)
   setRiskBadge(level)
@@ -819,13 +1080,14 @@ function renderAll(data, modeCfg, rawPayload) {
   renderScoreChart(records)
   renderStatusChart(records)
   renderDistributionChart(data, records)
-  renderVideoTimelineChart(timeline)
-  renderVideoMarkers(data, timeline, records)
+  renderVideoTimelineChart(videoTimeline)
+  renderVideoMarkers(data, videoTimeline.points, records)
+  void renderVideoFrames(data, videoTimeline.points)
 
-  const acoustic = buildAcousticProfile(data, timeline, records)
+  const acoustic = buildAcousticProfile(data, acousticTimeline.points, records)
   renderAcousticRadar(acoustic.profile)
   renderAcousticInsights(acoustic.insights)
-  renderAcousticTimeline(timeline)
+  renderAcousticTimeline(acousticTimeline)
 
   const textPayload = buildTextPayload(data, rawPayload, score)
   renderTranscript(textPayload)
@@ -839,7 +1101,6 @@ function renderAll(data, modeCfg, rawPayload) {
     setActiveTranscriptTerm(null)
   }
 
-  renderControlChart(records, data)
   rawJsonEl.textContent = JSON.stringify(data, null, 2)
 }
 
@@ -857,6 +1118,8 @@ function clearUI() {
 
   videoMarkerListEl.className = 'marker-list empty-note'
   videoMarkerListEl.textContent = 'Run analysis to see marker signals.'
+  setVideoFrameStripMessage('Run analysis to generate key frame previews.')
+  if(videoTimelineHintEl) videoTimelineHintEl.textContent = 'Awaiting CV markers.'
   acousticInsightsEl.innerHTML = '<span class="insight-chip">Awaiting audio-acoustic features</span>'
   acousticTimelineHintEl.textContent = 'Run analysis to populate the acoustic timeline.'
 
@@ -900,7 +1163,17 @@ async function sendRequest(modeCfg) {
     try { json = JSON.parse(text) } catch { json = { success: true, raw_text: text } }
 
     const data = normalizeResponse(json)
-    renderAll(data, modeCfg, json)
+    try {
+      renderAll(data, modeCfg, json)
+    } catch (err) {
+      console.error('Render error', err)
+      finishPipeline(false)
+      setStatus(`Render error: ${err.message}`, 'error')
+      summaryCardEl.innerHTML = `<h3>Summary</h3><div class="empty-note">${escapeHtml(err.message)}</div>`
+      rawJsonEl.textContent = JSON.stringify({ error: err.message, data }, null, 2)
+      clearCharts()
+      return
+    }
     finishPipeline(true)
     setStatus(`Done: ${modeCfg.label} (${elapsedMs} ms)`, 'ok')
   } catch (err) {
@@ -933,6 +1206,8 @@ videoInput.addEventListener('change', () => {
   if(!file) {
     selectedFileNameEl.textContent = 'No file selected'
     durationHintEl.textContent = 'Awaiting upload'
+    setVideoFrameStripMessage('Upload a video to preview key frames.')
+    if(videoTimelineHintEl) videoTimelineHintEl.textContent = 'Awaiting CV markers.'
     previewVideo.removeAttribute('src')
     previewVideo.load()
     return
@@ -940,10 +1215,18 @@ videoInput.addEventListener('change', () => {
 
   selectedFileNameEl.textContent = file.name
   durationHintEl.textContent = `${Math.round(file.size / 1024 / 1024 * 10) / 10} MB`
+  setVideoFrameStripMessage('Run analysis to generate key frame previews.')
 
   if(previewUrl) URL.revokeObjectURL(previewUrl)
   previewUrl = URL.createObjectURL(file)
   previewVideo.src = previewUrl
+})
+
+previewVideo.addEventListener('loadedmetadata', () => {
+  const sizeMb = videoInput.files?.[0] ? `${Math.round(videoInput.files[0].size / 1024 / 1024 * 10) / 10} MB` : ''
+  const duration = Number(previewVideo.duration)
+  const durationLabel = Number.isFinite(duration) && duration > 0 ? formatTime(duration) : 'Unknown duration'
+  durationHintEl.textContent = sizeMb ? `${durationLabel} | ${sizeMb}` : durationLabel
 })
 
 transcriptTextEl.addEventListener('click', event => {

@@ -251,6 +251,12 @@ async def test_nlp(
         prediction = raw.get("prediction")
         risk_score = raw.get("risk_score")
         risk_level = raw.get("risk_level")
+        segments = raw.get("segments", [])
+        transcript = " ".join(
+            str(seg.get("text", "")).strip()
+            for seg in segments
+            if str(seg.get("text", "")).strip()
+        ).strip()
 
         # 0 = контрольная группа, 1 = экспериментальная (risk)
         if prediction == 1:
@@ -266,7 +272,10 @@ async def test_nlp(
             "prediction_label": prediction_label,
             "risk_score": risk_score,
             "risk_level": risk_level,
-            "segments": raw.get("segments", []),
+            "transcript": transcript,
+            "full_text": transcript,
+            "raw_text": transcript,
+            "segments": segments,
         }
         logger.info(f"✓ /test/nlp returned successfully for {file.filename}")
         return output
