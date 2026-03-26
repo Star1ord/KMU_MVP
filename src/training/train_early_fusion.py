@@ -350,6 +350,7 @@ def main():
         'linear_svc_metrics': {
             'mean_roc_auc': float(np.mean([m['roc_auc'] for m in linear_metrics])),
             'mean_pr_auc': float(np.mean([m['pr_auc'] for m in linear_metrics])),
+            'mean_recall': float(np.mean([m['recall'] for m in linear_metrics])),
             'mean_f1': float(np.mean([m['f1'] for m in linear_metrics])),
             'mean_threshold': float(np.mean([m['threshold'] for m in linear_metrics])),
             'fold_results': [
@@ -375,6 +376,7 @@ def main():
         metadata['catboost_metrics'] = {
             'mean_roc_auc': float(np.mean([m['roc_auc'] for m in catboost_metrics])),
             'mean_pr_auc': float(np.mean([m['pr_auc'] for m in catboost_metrics])),
+            'mean_recall': float(np.mean([m['recall'] for m in catboost_metrics])),
             'mean_f1': float(np.mean([m['f1'] for m in catboost_metrics])),
             'mean_threshold': float(np.mean([m['threshold'] for m in catboost_metrics])),
             'fold_results': [
@@ -411,4 +413,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-

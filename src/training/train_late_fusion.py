@@ -420,6 +420,7 @@ def main():
         'audio_metrics': {
             'mean_roc_auc': float(np.mean([m['roc_auc'] for m in audio_metrics])),
             'mean_pr_auc': float(np.mean([m['pr_auc'] for m in audio_metrics])),
+            'mean_recall': float(np.mean([m['recall'] for m in audio_metrics])),
             'mean_f1': float(np.mean([m['f1'] for m in audio_metrics])),
             'fold_results': [
                 {k: float(v) if isinstance(v, (np.floating, float)) else v 
@@ -430,6 +431,7 @@ def main():
         'text_metrics': {
             'mean_roc_auc': float(np.mean([m['roc_auc'] for m in text_metrics])),
             'mean_pr_auc': float(np.mean([m['pr_auc'] for m in text_metrics])),
+            'mean_recall': float(np.mean([m['recall'] for m in text_metrics])),
             'mean_f1': float(np.mean([m['f1'] for m in text_metrics])),
             'fold_results': [
                 {k: float(v) if isinstance(v, (np.floating, float)) else v 
@@ -440,6 +442,7 @@ def main():
         'meta_metrics': {
             'mean_roc_auc': float(np.mean([m['roc_auc'] for m in meta_metrics])),
             'mean_pr_auc': float(np.mean([m['pr_auc'] for m in meta_metrics])),
+            'mean_recall': float(np.mean([m['recall'] for m in meta_metrics])),
             'mean_f1': float(np.mean([m['f1'] for m in meta_metrics])),
             'mean_threshold': float(np.mean([m['threshold'] for m in meta_metrics])),
             'fold_results': [
@@ -477,4 +480,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-

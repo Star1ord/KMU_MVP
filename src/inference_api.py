@@ -106,7 +106,7 @@ class InferenceEngine:
         if model_type == 'late_fusion':
             return self._predict_late_fusion(model, metadata, df, audio_cols, text_cols, threshold)
         else:
-            return self._predict_early_fusion(model, metadata, df, audio_cols, text_cols, threshold)
+            return self._predict_early_fusion(model_type, model, metadata, df, audio_cols, text_cols, threshold)
     
     def _predict_late_fusion(
         self,
@@ -166,11 +166,13 @@ class InferenceEngine:
             'decision': decision,
             'threshold': threshold,
             'confidence': max(probability, 1 - probability),
-            'feature_importance': feature_importance
+            'feature_importance': feature_importance,
+            'model_metrics': self._public_model_metrics('late_fusion', model, metadata),
         }
     
     def _predict_early_fusion(
         self,
+        model_type: str,
         model: Any,
         metadata: Dict,
         df: pd.DataFrame,
@@ -229,7 +231,8 @@ class InferenceEngine:
             'decision': decision,
             'threshold': threshold,
             'confidence': max(probability, 1 - probability),
-            'feature_importance': feature_importance
+            'feature_importance': feature_importance,
+            'model_metrics': self._public_model_metrics(model_type, model, metadata),
         }
     
     def batch_predict(
@@ -263,6 +266,85 @@ class InferenceEngine:
             'results': results,
             'summary': summary
         }
+
+    @staticmethod
+    def _safe_float(value: Any) -> Optional[float]:
+        """Return a finite float or None for non-numeric values."""
+        try:
+            if value is None:
+                return None
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return None
+        if np.isnan(numeric) or np.isinf(numeric):
+            return None
+        return numeric
+
+    def _mean_metric(self, rows: Any, key: str) -> Optional[float]:
+        """Average a metric across fold rows when only per-fold values are stored."""
+        if not isinstance(rows, list):
+            return None
+
+        values = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            value = self._safe_float(row.get(key))
+            if value is not None:
+                values.append(value)
+
+        if not values:
+            return None
+        return float(np.mean(values))
+
+    def _metrics_section(self, model_type: str, metadata: Dict[str, Any]) -> Dict[str, Any]:
+        """Pick the model-specific metrics section from heterogeneous metadata formats."""
+        if model_type == 'late_fusion':
+            return metadata.get('meta_metrics') or metadata.get('metrics', {}).get('meta') or {}
+        if model_type == 'early_fusion_catboost':
+            return metadata.get('catboost_metrics') or {}
+        if model_type == 'early_fusion_linear':
+            return metadata.get('linear_svc_metrics') or {}
+        return {}
+
+    def _public_model_metrics(
+        self,
+        model_type: str,
+        model: Any,
+        metadata: Dict[str, Any],
+    ) -> Dict[str, Optional[float]]:
+        """Expose stable public metrics, preferring recall over legacy accuracy-like summaries."""
+        section = self._metrics_section(model_type, metadata)
+
+        roc_auc = self._safe_float(section.get('mean_roc_auc'))
+        if roc_auc is None:
+            roc_auc = self._safe_float(section.get('roc_auc'))
+
+        pr_auc = self._safe_float(section.get('mean_pr_auc'))
+        if pr_auc is None:
+            pr_auc = self._safe_float(section.get('pr_auc'))
+
+        recall = self._safe_float(section.get('mean_recall'))
+        if recall is None:
+            recall = self._safe_float(section.get('recall'))
+        if recall is None:
+            recall = self._mean_metric(section.get('fold_results'), 'recall')
+
+        if recall is None and model_type == 'late_fusion' and isinstance(model, dict):
+            recall = self._safe_float(model.get('mean_metrics', {}).get('meta_recall'))
+            if recall is None:
+                recall = self._mean_metric(model.get('fold_metrics'), 'recall')
+
+        f1_score = self._safe_float(section.get('mean_f1'))
+        if f1_score is None:
+            f1_score = self._safe_float(section.get('f1'))
+
+        return {
+            'roc_auc': roc_auc,
+            'pr_auc': pr_auc,
+            'recall': recall,
+            'f1_score': f1_score,
+        }
     
     def get_models_info(self) -> Dict[str, Dict]:
         """Get information about available models"""
@@ -276,11 +358,7 @@ class InferenceEngine:
                     'name': model_type.replace('_', ' ').title(),
                     'type': model_type,
                     'version': metadata.get('version', 'unknown'),
-                    'metrics': {
-                        'roc_auc': metadata.get('mean_roc_auc'),
-                        'pr_auc': metadata.get('mean_pr_auc'),
-                        'f1_score': metadata.get('mean_f1')
-                    }
+                    'metrics': self._public_model_metrics(model_type, model, metadata)
                 }
             except Exception as e:
                 models_info[model_type] = {

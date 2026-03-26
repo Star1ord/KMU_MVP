@@ -21,7 +21,7 @@ from sklearn.svm import LinearSVC
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import GroupKFold
-from sklearn.metrics import roc_auc_score, average_precision_score, f1_score
+from sklearn.metrics import roc_auc_score, average_precision_score, f1_score, recall_score
 import catboost as cb
 import json
 
@@ -210,6 +210,11 @@ for fold, (train_idx, val_idx) in enumerate(gkf.split(X_meta, y, groups), 1):
         y_pred = (oof_meta[val_idx] >= thr).astype(int)
         f1_scores.append(f1_score(y[val_idx], y_pred))
     best_f1 = max(f1_scores)
+    best_recall = recall_score(
+        y[val_idx],
+        (oof_meta[val_idx] >= thresholds[np.argmax(f1_scores)]).astype(int),
+        zero_division=0,
+    )
     
     # Get weights
     weights_text = meta_model.coef_[0][0]
@@ -221,11 +226,13 @@ for fold, (train_idx, val_idx) in enumerate(gkf.split(X_meta, y, groups), 1):
     fold_metrics.append({
         'roc_auc': roc,
         'pr_auc': pr,
+        'recall': best_recall,
         'f1': best_f1
     })
 
 mean_roc_meta = roc_auc_score(y, oof_meta)
 mean_pr_meta = average_precision_score(y, oof_meta)
+mean_recall_meta = np.mean([m['recall'] for m in fold_metrics])
 mean_f1_meta = np.mean([m['f1'] for m in fold_metrics])
 
 print(f"\n[Meta-model mean] roc-auc: {mean_roc_meta:.4f} | pr-auc: {mean_pr_meta:.4f} | f1: {mean_f1_meta:.4f}")
@@ -255,7 +262,7 @@ print(f"\nOptimal threshold: {optimal_threshold:.4f} (F1={best_f1:.4f})")
 # ============================================================================
 # Confusion Matrix
 # ============================================================================
-from sklearn.metrics import confusion_matrix, accuracy_score, precision_score, recall_score
+from sklearn.metrics import confusion_matrix, accuracy_score, precision_score
 
 y_pred_final = (oof_meta >= optimal_threshold).astype(int)
 cm = confusion_matrix(y, y_pred_final)
@@ -302,6 +309,7 @@ model_package = {
         'audio_pr_auc': mean_pr_audio,
         'meta_roc_auc': mean_roc_meta,
         'meta_pr_auc': mean_pr_meta,
+        'meta_recall': mean_recall_meta,
         'meta_f1': mean_f1_meta
     }
 }
@@ -322,7 +330,7 @@ metadata = {
     'metrics': {
         'text': {'roc_auc': mean_roc_text, 'pr_auc': mean_pr_text},
         'audio': {'roc_auc': mean_roc_audio, 'pr_auc': mean_pr_audio},
-        'meta': {'roc_auc': mean_roc_meta, 'pr_auc': mean_pr_meta, 'f1': mean_f1_meta}
+        'meta': {'roc_auc': mean_roc_meta, 'pr_auc': mean_pr_meta, 'recall': mean_recall_meta, 'f1': mean_f1_meta}
     }
 }
 
@@ -344,4 +352,3 @@ print(f"  F1:      {mean_f1_meta:.4f}")
 print(f"  Threshold: {optimal_threshold:.4f}")
 print("\n✅ CLEAN MODEL WITHOUT LOUDNESS")
 print("="*80)
-

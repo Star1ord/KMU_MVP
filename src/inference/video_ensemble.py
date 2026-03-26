@@ -8,6 +8,7 @@ import os
 import sys
 import tempfile
 import csv
+import json
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 import pandas as pd
@@ -20,6 +21,72 @@ sys.path.insert(0, str(VIDEO_INTEGRATION_DIR))
 
 VIDEO_AVAILABLE = False
 IMPORT_ERROR = None
+
+
+def _safe_metric_value(value) -> Optional[float]:
+    try:
+        if value is None:
+            return None
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if np.isnan(numeric) or np.isinf(numeric):
+        return None
+    return numeric
+
+
+def _load_video_model_metrics() -> Dict[str, Optional[float]]:
+    """Expose stable model metrics for API/UI consumers, preferring recall."""
+    candidates = [
+        Path("models/cv/model_report.json"),
+        Path("src/models/video_model_report.json"),
+    ]
+
+    for path in candidates:
+        if not path.exists() or path.stat().st_size == 0:
+            continue
+        try:
+            with path.open("r", encoding="utf-8") as fp:
+                payload = json.load(fp)
+        except Exception:
+            continue
+
+        recall = _safe_metric_value(payload.get("recall_mean"))
+        if recall is None:
+            recall = _safe_metric_value(payload.get("test_metrics", {}).get("recall"))
+        if recall is None:
+            recall = _safe_metric_value(
+                payload.get("test_metrics", {})
+                .get("classification_report", {})
+                .get("1", {})
+                .get("recall")
+            )
+
+        roc_auc = _safe_metric_value(payload.get("roc_auc_mean"))
+        if roc_auc is None:
+            roc_auc = _safe_metric_value(payload.get("test_metrics", {}).get("roc_auc"))
+
+        pr_auc = _safe_metric_value(payload.get("pr_auc_mean"))
+        if pr_auc is None:
+            pr_auc = _safe_metric_value(payload.get("test_metrics", {}).get("pr_auc"))
+
+        f1_score = _safe_metric_value(payload.get("f1_mean"))
+        if f1_score is None:
+            f1_score = _safe_metric_value(payload.get("test_metrics", {}).get("f1_score"))
+
+        return {
+            "roc_auc": roc_auc,
+            "pr_auc": pr_auc,
+            "recall": recall,
+            "f1_score": f1_score,
+        }
+
+    return {
+        "roc_auc": None,
+        "pr_auc": None,
+        "recall": None,
+        "f1_score": None,
+    }
 
 
 def _ensure_protobuf_runtime_compat() -> None:
@@ -459,6 +526,7 @@ def predict_with_video_model(
         'probability': None,
         'prediction': None,
         'risk_level': None,
+        'metrics': _load_video_model_metrics(),
         'error': None
     }
     

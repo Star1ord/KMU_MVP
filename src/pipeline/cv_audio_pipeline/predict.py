@@ -10,6 +10,7 @@ Based on the training notebook `cv_audio_test/audio_cv_1to1.py`:
 from __future__ import annotations
 
 import math
+import json
 import os
 import subprocess
 import tempfile
@@ -26,6 +27,75 @@ _VGG_MODELS: Dict[str, Any] = {}
 _HAAR_CASCADE = None
 _RETINAFACE_AVAILABLE: Optional[bool] = None
 _RETINAFACE_CLASS = None
+
+
+def _safe_metric_value(value: Any) -> Optional[float]:
+    try:
+        if value is None:
+            return None
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if np.isnan(numeric) or np.isinf(numeric):
+        return None
+    return numeric
+
+
+def _load_cv_audio_metrics() -> Dict[str, Optional[float]]:
+    """Read public metrics from optional CV+Audio metadata, preferring recall."""
+    metadata_path = Path("models/cv_audio/metadata.json")
+    if not metadata_path.exists() or metadata_path.stat().st_size == 0:
+        return {
+            "roc_auc": None,
+            "pr_auc": None,
+            "recall": None,
+            "f1_score": None,
+        }
+
+    try:
+        with metadata_path.open("r", encoding="utf-8") as fp:
+            payload = json.load(fp)
+    except Exception:
+        return {
+            "roc_auc": None,
+            "pr_auc": None,
+            "recall": None,
+            "f1_score": None,
+        }
+
+    metrics = payload.get("metrics", {}) if isinstance(payload, dict) else {}
+    model_metrics = payload.get("model_metrics", {}) if isinstance(payload, dict) else {}
+
+    recall = _safe_metric_value(payload.get("mean_recall"))
+    if recall is None:
+        recall = _safe_metric_value(payload.get("recall_mean"))
+    if recall is None:
+        recall = _safe_metric_value(metrics.get("recall"))
+    if recall is None:
+        recall = _safe_metric_value(model_metrics.get("recall"))
+    if recall is None:
+        recall = _safe_metric_value(payload.get("test_metrics", {}).get("recall"))
+
+    roc_auc = _safe_metric_value(payload.get("mean_roc_auc"))
+    if roc_auc is None:
+        roc_auc = _safe_metric_value(metrics.get("roc_auc"))
+
+    pr_auc = _safe_metric_value(payload.get("mean_pr_auc"))
+    if pr_auc is None:
+        pr_auc = _safe_metric_value(metrics.get("pr_auc"))
+
+    f1_score = _safe_metric_value(payload.get("mean_f1"))
+    if f1_score is None:
+        f1_score = _safe_metric_value(metrics.get("f1"))
+    if f1_score is None:
+        f1_score = _safe_metric_value(model_metrics.get("f1_score"))
+
+    return {
+        "roc_auc": roc_auc,
+        "pr_auc": pr_auc,
+        "recall": recall,
+        "f1_score": f1_score,
+    }
 
 
 def _find_onnx_model_path(model_path: Optional[str] = None) -> str:
@@ -451,6 +521,7 @@ def predict_cv_audio(
         "prediction": None,
         "prediction_label": None,
         "risk_level": None,
+        "metrics": _load_cv_audio_metrics(),
         "error": None,
     }
 

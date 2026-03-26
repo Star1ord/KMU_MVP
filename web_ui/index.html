@@ -1,64 +1,215 @@
 <!doctype html>
-<html lang="ru">
+<html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
   <meta http-equiv="Pragma" content="no-cache" />
   <meta http-equiv="Expires" content="0" />
-  <title>Inference Dashboard</title>
-  <link rel="stylesheet" href="style.css?v=20260225-2">
+  <title>Multimodal Suicide Risk Classification System</title>
+  <link rel="stylesheet" href="style.css?v=20260311-2">
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 <body>
-  <div class="container">
-    <h1>Inference Dashboard</h1>
+  <div class="page-glow glow-a"></div>
+  <div class="page-glow glow-b"></div>
 
-    <div class="controls">
-      <label class="file-label">Выберите видео
-        <input id="videoInput" type="file" accept="video/*">
-      </label>
+  <header class="top-nav">
+    <div class="brand">
+      <div class="brand-mark" aria-hidden="true"></div>
+      <span>Multimodal Suicide Risk Classification System</span>
+    </div>
+    <nav class="nav-links">
+      <a href="#intro">Intro</a>
+      <a href="#analysis-input">Analysis Input</a>
+      <a href="#results-overview">Results Overview</a>
+      <a href="#video-markers">Video Markers</a>
+      <a href="#audio-text">Audio & Text</a>
+      <a href="#model-metrics">Model Metrics</a>
+      <a href="#control-comparison">Control Comparison</a>
+    </nav>
+    <button id="jumpAnalyzeBtn" class="btn btn-ghost">Get Started</button>
+  </header>
 
-      <div id="modeOptions" class="options"></div>
+  <main class="container">
+    <section id="intro" class="section hero-section">
+      <p class="eyebrow">AI-Driven Clinical Decision Support</p>
+      <h1>Multimodal Suicide Risk Classification System</h1>
+      <p class="hero-subtitle">
+        Integrated analysis across NLP transcript signals, video markers, and audio-acoustic patterns.
+        Upload one interview and review unified multimodal evidence with model influence.
+      </p>
+    </section>
 
-      <div class="buttons">
-        <button id="runBtn">Запустить</button>
-        <button id="clearBtn">Очистить</button>
+    <section id="analysis-input" class="section">
+      <h2>Analysis Input & Data Source</h2>
+      <div class="analysis-grid">
+        <article class="panel control-panel">
+          <h3>Analyze New Interview</h3>
+          <label class="file-picker">
+            <span>Upload Video</span>
+            <input id="videoInput" type="file" accept="video/*">
+          </label>
+          <div id="selectedFileName" class="file-name">No file selected</div>
+          <div id="modeOptions" class="mode-options"></div>
+          <div class="action-row">
+            <button id="runBtn" class="btn btn-primary">Run Analysis</button>
+            <button id="clearBtn" class="btn btn-secondary">Clear</button>
+          </div>
+          <div id="status" class="status">Ready.</div>
+        </article>
+
+        <article class="panel preview-panel">
+          <div class="panel-head">
+            <h3>Session Preview</h3>
+            <span id="durationHint" class="small-note">Awaiting upload</span>
+          </div>
+          <video id="previewVideo" controls preload="metadata"></video>
+          <div class="timeline-note">Risk marker stream appears after processing.</div>
+        </article>
+
+        <article class="panel stream-panel">
+          <h3>Live Data Stream</h3>
+          <div id="pipelineStage" class="pipeline-stage">Idle</div>
+          <div class="pipeline-bar-wrap"><span id="pipelineBar" class="pipeline-bar"></span></div>
+          <div class="stream-graph">
+            <div id="nodeInput" class="stream-node live">Input</div>
+            <div class="stream-link"></div>
+            <div id="nodePrep" class="stream-node cv">Preprocess</div>
+            <div id="nodeModels" class="stream-node audio">Run Models</div>
+            <div id="nodeFusion" class="stream-node nlp">Fusion</div>
+            <div id="nodeDone" class="stream-node ensemble">Done</div>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <section id="results-overview" class="section">
+      <h2>Analysis Results Overview</h2>
+      <div class="overview-grid">
+        <article class="panel gauge-panel">
+          <canvas id="riskGaugeChart" height="200"></canvas>
+          <div class="risk-line">
+            <span>Risk Score</span>
+            <strong id="riskScoreValue">-</strong>
+            <span id="riskLevelBadge" class="risk-badge">Unknown</span>
+          </div>
+          <button id="toggleRawBtn" class="btn btn-secondary">View Raw JSON</button>
+        </article>
+        <article id="summaryCard" class="panel"></article>
+      </div>
+      <article id="rawPanel" class="panel raw-card hidden">
+        <h3>Raw JSON</h3>
+        <pre id="rawJson">{}</pre>
+      </article>
+    </section>
+
+    <section id="video-markers" class="section">
+      <h2>Multimodal Marker Interpretation - Video (CV)</h2>
+      <article class="panel">
+        <canvas id="videoTimelineChart" height="130"></canvas>
+        <div id="videoMarkerList" class="marker-list empty-note">Run analysis to see marker signals.</div>
+      </article>
+    </section>
+
+    <section id="audio-text" class="section">
+      <h2>Multimodal Marker Interpretation - Audio & Acoustic</h2>
+      <div class="audio-grid">
+        <article class="panel">
+          <h3>Acoustic Profile</h3>
+          <div class="chart-wrap chart-wrap-audio">
+            <canvas id="acousticRadarChart" height="220"></canvas>
+          </div>
+          <div id="acousticInsights" class="insight-row"></div>
+        </article>
+        <article class="panel">
+          <h3>Acoustic Timeline</h3>
+          <div class="chart-wrap chart-wrap-audio">
+            <canvas id="acousticTimelineChart" height="220"></canvas>
+          </div>
+          <div id="acousticTimelineHint" class="small-note"></div>
+        </article>
+      </div>
+    </section>
+
+    <section id="text-nlp" class="section">
+      <h2>Multimodal Marker Interpretation - Text (NLP) & Model Influence</h2>
+      <div class="text-grid">
+        <article class="panel">
+          <h3>Highlighted Transcript</h3>
+          <div id="transcriptText" class="transcript-box"></div>
+        </article>
+        <article class="panel marker-panel">
+          <h3>Text Marker</h3>
+          <div id="textMarkerInfo" class="marker-info"></div>
+          <h3>Model and Ensemble Contribution</h3>
+          <div id="influenceTableWrap"></div>
+        </article>
+      </div>
+    </section>
+
+    <section id="model-metrics" class="section">
+      <h2>Model Technical Metrics</h2>
+      <div class="metrics-grid">
+        <article class="panel chart-panel">
+          <h3>Model Scores</h3>
+          <div class="chart-wrap chart-wrap-metrics">
+            <canvas id="scoreChart" height="180"></canvas>
+          </div>
+        </article>
+        <article class="panel chart-panel">
+          <h3>Model Statuses</h3>
+          <div class="chart-wrap chart-wrap-metrics">
+            <canvas id="statusChart" height="180"></canvas>
+          </div>
+        </article>
+        <article class="panel chart-panel">
+          <h3>Consolidated Influence</h3>
+          <div class="chart-wrap chart-wrap-metrics">
+            <canvas id="distributionChart" height="180"></canvas>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <section id="control-comparison" class="section">
+      <h2>Control Group Comparison</h2>
+      <article class="panel chart-panel">
+        <div class="chart-wrap chart-wrap-control">
+          <canvas id="controlChart" height="190"></canvas>
+        </div>
+      </article>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="footer-links">
+      <a href="#intro">Intro</a>
+      <a href="#analysis-input">Analysis Input</a>
+      <a href="#results-overview">Results Overview</a>
+      <a href="#video-markers">Video Markers</a>
+      <a href="#audio-text">Audio & Text</a>
+      <a href="#model-metrics">Model Metrics</a>
+      <a href="#control-comparison">Control Comparison</a>
+    </div>
+    <div class="footer-meta">
+      <div>
+        <strong>Project Documentation</strong>
+        <div>Raw JSON Data</div>
+      </div>
+      <div>
+        <strong>System Information</strong>
+        <div>Pipeline: NLP + CV + CV/Audio</div>
+      </div>
+      <div>
+        <strong>Contact Info</strong>
+        <div>nasha.pochta@example.com</div>
       </div>
     </div>
+    <div class="copyright">Copyright � 2026</div>
+  </footer>
 
-    <div id="status" class="status">Готово.</div>
-
-    <div class="cards-grid">
-      <section id="summaryCard" class="card"></section>
-      <section id="metaCard" class="card"></section>
-    </div>
-
-    <div class="charts-grid">
-      <section class="card chart-card">
-        <h3>Scores</h3>
-        <canvas id="scoreChart" height="170"></canvas>
-      </section>
-      <section class="card chart-card">
-        <h3>Statuses</h3>
-        <canvas id="statusChart" height="170"></canvas>
-      </section>
-      <section class="card chart-card">
-        <h3>Timeline</h3>
-        <canvas id="timelineChart" height="170"></canvas>
-      </section>
-      <section class="card chart-card">
-        <h3>Distribution</h3>
-        <canvas id="distributionChart" height="170"></canvas>
-      </section>
-    </div>
-
-    <section class="card raw-card">
-      <h3>Raw JSON</h3>
-      <pre id="rawJson">{}</pre>
-    </section>
-  </div>
-
-  <script src="app.js?v=20260225-2"></script>
+  <script src="app.js?v=20260311-2"></script>
 </body>
 </html>
+
