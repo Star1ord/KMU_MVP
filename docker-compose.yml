@@ -1,0 +1,26 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: docker/inference.Dockerfile
+    environment:
+      AUTO_YES: "1"
+      PYTHONUNBUFFERED: "1"
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models:ro
+    restart: unless-stopped
+
+  frontend:
+    image: python:3.10-slim
+    working_dir: /app/web_ui
+    command: python -m http.server 5500 --bind 0.0.0.0
+    ports:
+      - "5500:5500"
+    volumes:
+      - ./web_ui:/app/web_ui:ro
+    depends_on:
+      - backend
+    restart: unless-stopped

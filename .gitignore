@@ -1,23 +1,51 @@
-# Python
-# __pycache__/
-# *.py[cod]
+# Python cache
+__pycache__/
+*.py[cod]
+*.so
 
-# Virtual env
-# venv/
-# env/
+# Virtual environments
+.venv/
+venv/
+env/
 
-# Byte-compiled / optimized / DLL files
-# *.pyc
-# *.pyo
-# *.pyd
+# Test and lint caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# IDE and OS
+.cursor/
+.idea/
+Thumbs.db
+.DS_Store
+
+# Notebooks
+.ipynb_checkpoints/
+/*.ipynb
 
 # Logs
-# .logs/
-# *.log
+*.log
 
-# Ignore large raw media and sample data
-/data/raw/audio_wav/
-/data/raw/
-/sample_data/
-/examples/sample_data/
-examples/out.json
+# Generated runtime data
+/data/raw/*
+!/data/raw/.gitkeep
+/data/processed/*
+!/data/processed/.gitkeep
+/data/cache/*
+!/data/cache/.gitkeep
+/data/ml/*
+!/data/ml/.gitkeep
+/data/processed_csv/
+
+# Local sample media and generated outputs
+/examples/sample_data/*
+!/examples/sample_data/.gitkeep
+/examples/out.json
+/models/cv_audio/model.joblib
+
+# Local reports and temporary repo snapshots
+/structure.txt
+/results/
