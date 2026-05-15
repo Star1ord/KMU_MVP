@@ -184,11 +184,23 @@ function formatNumber(v) {
   if(v === null || v === undefined) return '-'
   const n = Number(v)
   if(Number.isNaN(n)) return String(v)
-  if(n !== 0 && Math.abs(n) < 0.001) {
-    const tiny = Math.round(n * 10000) / 10000
-    return tiny === 0 ? '0' : tiny.toFixed(4).replace(/0+$/, '').replace(/\.$/, '')
+  if(n !== 0 && Math.abs(n) < 0.0001) {
+    return n.toExponential(3).replace('e+', 'e')
+  }
+  if(n > 0 && n < 0.001) {
+    return n.toFixed(6).replace(/0+$/, '').replace(/\.$/, '')
+  }
+  if(n < 1 && n > 0.999) {
+    return n.toFixed(6).replace(/0+$/, '').replace(/\.$/, '')
   }
   return (Math.round(n * 1000) / 1000).toString()
+}
+
+function formatPercent(v) {
+  if(v === null || v === undefined) return '-'
+  const n = Number(v)
+  if(Number.isNaN(n)) return String(v)
+  return `${formatNumber(n * 100)}%`
 }
 
 function clamp01(v) {
@@ -262,16 +274,16 @@ function extractModelRecords(data, modeCfg) {
   if(data?.models && typeof data.models === 'object') {
     Object.entries(data.models).forEach(([name, value]) => {
       if(!value || typeof value !== 'object') return
-      records.push({ name, success: value.success, prediction: value.prediction, prediction_label: value.prediction_label, risk_level: value.risk_level, score: pickScore(value), error: value.error })
+      records.push({ name, success: value.success, prediction: value.prediction, prediction_label: value.prediction_label, risk_level: value.risk_level, score: pickScore(value), metrics: value.metrics || null, error: value.error })
     })
   }
   if(data?.overall?.ensemble?.ensemble_score !== undefined) {
-    records.push({ name: 'ensemble', success: true, prediction: data.overall.ensemble.ensemble_prediction, prediction_label: data.overall.ensemble.ensemble_prediction_label, risk_level: data.overall.ensemble.risk_level, score: Number(data.overall.ensemble.ensemble_score), error: null })
+    records.push({ name: 'ensemble', success: true, prediction: data.overall.ensemble.ensemble_prediction, prediction_label: data.overall.ensemble.ensemble_prediction_label, risk_level: data.overall.ensemble.risk_level, score: Number(data.overall.ensemble.ensemble_score), metrics: null, error: null })
   }
   if(records.length === 0) {
-    records.push({ name: modeCfg.id, success: data?.success, prediction: data?.prediction, prediction_label: data?.prediction_label, risk_level: data?.risk_level, score: pickScore(data), error: data?.error })
+    records.push({ name: modeCfg.id, success: data?.success, prediction: data?.prediction, prediction_label: data?.prediction_label, risk_level: data?.risk_level, score: pickScore(data), metrics: data?.metrics || null, error: data?.error })
     if(data?.cv_audio_probability !== undefined) {
-      records.push({ name: 'cv_audio', success: data?.cv_audio_success, prediction: null, prediction_label: null, risk_level: null, score: Number(data.cv_audio_probability), error: data?.cv_audio_error })
+      records.push({ name: 'cv_audio', success: data?.cv_audio_success, prediction: null, prediction_label: null, risk_level: null, score: Number(data.cv_audio_probability), metrics: data?.metrics || null, error: data?.cv_audio_error })
     }
   }
   const dedup = new Map()
@@ -484,10 +496,11 @@ function renderSummary(data, modeCfg, records, score, level) {
 
   let html = '<h3>Summary</h3><table class="kv">'
   rows.forEach(([k, v]) => { html += `<tr><td><b>${escapeHtml(k)}</b></td><td>${escapeHtml(v ?? '-')}</td></tr>` })
-  html += '</table><h3 style="margin-top:12px;">Model metrics</h3><table class="model-table"><thead><tr><th>Model</th><th>Success</th><th>Pred</th><th>Risk</th><th>Score</th><th>Error</th></tr></thead><tbody>'
+  html += '</table><h3 style="margin-top:12px;">Model metrics</h3><table class="model-table"><thead><tr><th>Model</th><th>Success</th><th>Pred</th><th>Risk</th><th>Score</th><th>Recall</th><th>Error</th></tr></thead><tbody>'
   records.forEach(r => {
     const cls = r.success === true ? 'model-ok' : (r.success === false ? 'model-bad' : '')
-    html += `<tr><td>${escapeHtml(modelTitle(r.name))}</td><td class="${cls}">${escapeHtml(r.success ?? '-')}</td><td>${escapeHtml(r.prediction_label ?? r.prediction ?? '-')}</td><td>${escapeHtml(r.risk_level ?? '-')}</td><td>${escapeHtml(formatNumber(r.score))}</td><td>${escapeHtml(r.error ?? '-')}</td></tr>`
+    const recall = r?.metrics?.recall
+    html += `<tr><td>${escapeHtml(modelTitle(r.name))}</td><td class="${cls}">${escapeHtml(r.success ?? '-')}</td><td>${escapeHtml(r.prediction_label ?? r.prediction ?? '-')}</td><td>${escapeHtml(r.risk_level ?? '-')}</td><td>${escapeHtml(formatNumber(r.score))}</td><td>${escapeHtml(formatPercent(recall))}</td><td>${escapeHtml(r.error ?? '-')}</td></tr>`
   })
   summaryCardEl.innerHTML = `${html}</tbody></table>`
 }
