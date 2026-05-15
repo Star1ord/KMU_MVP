@@ -6,6 +6,7 @@ Analyze a newly uploaded media file and return multimodal predictions.
 
 from __future__ import annotations
 
+from concurrent.futures import Future, ThreadPoolExecutor
 import json
 import re
 import shutil
@@ -67,14 +68,14 @@ def _extract_session_rows(df: pd.DataFrame, session_id: str, label: int) -> tupl
     ]
 
     for variant in search_variants:
-        session_rows = df[df["file_id"].astype(str) == str(variant)].copy()
+        session_rows = df[df["file_id"].astype(str) == str(variant)].copy().reset_index(drop=True)
         if not session_rows.empty:
             return str(variant), session_rows
 
     for file_id in available_file_ids:
         file_id_str = str(file_id)
         if session_id in file_id_str or file_id_str in session_id:
-            session_rows = df[df["file_id"].astype(str) == file_id_str].copy()
+            session_rows = df[df["file_id"].astype(str) == file_id_str].copy().reset_index(drop=True)
             if not session_rows.empty:
                 return file_id_str, session_rows
 
@@ -234,6 +235,8 @@ def _build_video_interpretation(video_result: Dict[str, Any] | None) -> tuple[li
     if frame_df.empty:
         return [], []
 
+    frame_df = frame_df.reset_index(drop=True)
+
     source_map = {
         "gaze_away_time": ("Gaze away", False),
         "head_down_duration": ("Head down", False),
@@ -272,10 +275,10 @@ def _build_video_interpretation(video_result: Dict[str, Any] | None) -> tuple[li
     ).fillna(0.0)
 
     timeline: list[Dict[str, Any]] = []
-    for index, score in frame_scores.items():
+    for position, score in enumerate(frame_scores.tolist()):
         timeline.append(
             {
-                "x": float(timestamp_values.iloc[index]),
+                "x": float(timestamp_values.iloc[position]),
                 "y": _clamp01(score),
             }
         )
@@ -283,12 +286,13 @@ def _build_video_interpretation(video_result: Dict[str, Any] | None) -> tuple[li
     top_rows = frame_scores.sort_values(ascending=False).head(4).index.tolist()
     markers: list[Dict[str, Any]] = []
     for row_index in top_rows:
+        row_position = int(frame_df.index.get_loc(row_index))
         driver_pairs: list[tuple[str, float]] = []
         for column_name, (label, _invert) in source_map.items():
             series = normalized_columns.get(column_name)
             if series is None:
                 continue
-            driver_pairs.append((label, _clamp01(series.iloc[row_index])))
+            driver_pairs.append((label, _clamp01(series.iloc[row_position])))
         driver_pairs.sort(key=lambda item: item[1], reverse=True)
         top_signals = [
             {"feature": label, "value": float(score)}
@@ -297,9 +301,9 @@ def _build_video_interpretation(video_result: Dict[str, Any] | None) -> tuple[li
         ]
         markers.append(
             {
-                "timestamp": float(timestamp_values.iloc[row_index]),
-                "frame_idx": int(frame_df.iloc[row_index].get("frame_idx", row_index)),
-                "score": _clamp01(frame_scores.iloc[row_index]),
+                "timestamp": float(timestamp_values.iloc[row_position]),
+                "frame_idx": int(frame_df.iloc[row_position].get("frame_idx", row_position)),
+                "score": _clamp01(frame_scores.iloc[row_position]),
                 "top_signals": top_signals,
             }
         )
@@ -315,7 +319,7 @@ def _build_acoustic_interpretation(session_data: pd.DataFrame | None) -> tuple[D
     if not any(column in session_data.columns for column in required_any):
         return None, [], []
 
-    numeric = session_data.copy()
+    numeric = session_data.copy().reset_index(drop=True)
 
     pause_series = _normalize_series(numeric["pause_ratio"]) if "pause_ratio" in numeric.columns else pd.Series(np.zeros(len(numeric)), index=numeric.index)
     slow_speech_series = _normalize_series(numeric["speech_rate"], invert=True) if "speech_rate" in numeric.columns else pd.Series(np.zeros(len(numeric)), index=numeric.index)
@@ -332,11 +336,11 @@ def _build_acoustic_interpretation(session_data: pd.DataFrame | None) -> tuple[D
     ).clip(lower=0.0, upper=1.0)
 
     timeline: list[Dict[str, Any]] = []
-    for index, row in numeric.iterrows():
+    for position, (_, row) in enumerate(numeric.iterrows()):
         start_time = _coerce_time_value(row.get("start", row.get("start_time")), 0.0)
         end_time = _coerce_time_value(row.get("end", row.get("end_time")), start_time)
         midpoint = start_time + max(0.0, end_time - start_time) / 2.0
-        timeline.append({"x": midpoint, "y": _clamp01(segment_scores.iloc[index])})
+        timeline.append({"x": midpoint, "y": _clamp01(segment_scores.iloc[position])})
 
     profile = {
         "labels": [
@@ -790,7 +794,7 @@ def _run_video_models(
                 video_path=str(media_file),
                 output_dir=None,
                 sample_every=max(1, int(video_sample_every)),
-                use_emotions=None,
+                use_emotions=False,
             )
 
             if video_csv_path and not video_error:
@@ -920,11 +924,24 @@ def analyze_new_media_file(
     original_media_path = str(media_file)
 
     temp_dir: Path | None = None
+    video_executor: ThreadPoolExecutor | None = None
+    video_future: Future | None = None
 
     try:
         print("\n" + "=" * 80)
         print(f"Analyzing: {session_id}")
         print("=" * 80)
+
+        if media_file.suffix.lower() in {".mp4", ".mov", ".mkv", ".avi", ".webm"} and (not skip_video or not skip_cv_audio):
+            video_executor = ThreadPoolExecutor(max_workers=1)
+            video_future = video_executor.submit(
+                _run_video_models,
+                media_file=media_file,
+                skip_video=skip_video,
+                skip_cv_audio=skip_cv_audio,
+                video_sample_every=video_sample_every,
+                cv_audio_sample_rate=cv_audio_sample_rate,
+            )
 
         processing_report = process_new_media(
             media_files=[str(media_file)],
@@ -945,13 +962,16 @@ def analyze_new_media_file(
                 print(f"  - {message}")
             _append_error(result, " | ".join(str(message) for message in pipeline_errors))
 
-        video_result, cv_audio_result = _run_video_models(
-            media_file=media_file,
-            skip_video=skip_video,
-            skip_cv_audio=skip_cv_audio,
-            video_sample_every=video_sample_every,
-            cv_audio_sample_rate=cv_audio_sample_rate,
-        )
+        if video_future is not None:
+            video_result, cv_audio_result = video_future.result()
+        else:
+            video_result, cv_audio_result = _run_video_models(
+                media_file=media_file,
+                skip_video=skip_video,
+                skip_cv_audio=skip_cv_audio,
+                video_sample_every=video_sample_every,
+                cv_audio_sample_rate=cv_audio_sample_rate,
+            )
         result["video_result"] = video_result
         result["cv_audio_result"] = cv_audio_result
         result["video_timeline"], result["video_markers"] = _build_video_interpretation(video_result)
@@ -1047,6 +1067,8 @@ def analyze_new_media_file(
         elif not result.get("error"):
             result["error"] = "No model produced a usable result for this session"
     finally:
+        if video_executor is not None:
+            video_executor.shutdown(wait=bool(video_future is not None and not video_future.done()), cancel_futures=True)
         if temp_dir is not None:
             try:
                 shutil.rmtree(temp_dir)
@@ -1071,7 +1093,7 @@ def build_pretty_response(result: Dict[str, Any]) -> Dict[str, Any]:
             "probability": float(result.get("nlp_risk_score")) if result.get("nlp_success") and result.get("nlp_risk_score") is not None else None,
             "transcript": result.get("transcript", ""),
             "full_text": result.get("full_text", ""),
-            "error": result.get("nlp_error"),
+            "error": None if result.get("nlp_success") else result.get("nlp_error"),
         }
     }
 

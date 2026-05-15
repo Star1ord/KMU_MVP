@@ -1,13 +1,24 @@
 import argparse
+import contextlib
 import csv
 import glob
+import io
 import json
 import os
+from pathlib import Path
+import sys
 from typing import Dict, Iterable, List, Optional, Tuple
 
 import cv2
 
-from realtime_test import HSEMOTION_AVAILABLE, RealtimeAnalyzer
+ROOT = Path(__file__).resolve().parents[3]
+VIDEO_INTEGRATION_DIR = ROOT / "video_integration"
+if str(VIDEO_INTEGRATION_DIR) not in sys.path:
+    sys.path.insert(0, str(VIDEO_INTEGRATION_DIR))
+
+with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+    import realtime_test as _realtime_test
+    from realtime_test import HSEMOTION_AVAILABLE, RealtimeAnalyzer
 
 
 class VideoAnalyzer(RealtimeAnalyzer):
@@ -16,9 +27,20 @@ class VideoAnalyzer(RealtimeAnalyzer):
     но позволяющий отключать тяжелую отрисовку.
     """
 
-    def __init__(self, render_overlay: bool = False):
-        super().__init__()
+    def __init__(self, render_overlay: bool = False, use_emotions: Optional[bool] = None):
+        original_hsemotion_available = getattr(_realtime_test, "HSEMOTION_AVAILABLE", False)
+        if use_emotions is False:
+            _realtime_test.HSEMOTION_AVAILABLE = False
+
+        try:
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                super().__init__()
+        finally:
+            _realtime_test.HSEMOTION_AVAILABLE = original_hsemotion_available
+
         self.render_overlay = render_overlay
+        if use_emotions is not None:
+            self.use_emotions = bool(use_emotions and original_hsemotion_available)
 
     def draw_info(self, frame, avg_ear):
         """Переопределяем, чтобы по умолчанию не рисовать HUD."""
@@ -138,24 +160,45 @@ def process_video_file(
         raise RuntimeError(f"Не удалось открыть видео: {video_path}")
 
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-    analyzer = VideoAnalyzer(render_overlay=render_overlay)
-
-    if use_emotions is not None:
-        analyzer.use_emotions = bool(use_emotions and HSEMOTION_AVAILABLE)
+    analyzer = VideoAnalyzer(render_overlay=render_overlay, use_emotions=use_emotions)
 
     print(f"[+] Старт обработки {os.path.basename(video_path)} (FPS ~ {fps:.1f})")
 
     rows = []
     event_logger = EventLogger(event_log_path) if event_log_path else None
     frame_idx = 0
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    sample_step = max(1, int(sample_every))
+    if total_frames > 0:
+        max_samples = 300
+        sample_step = max(sample_step, max(1, total_frames // max_samples))
 
     try:
-        while True:
+        if total_frames > 0:
+            for frame_idx in range(0, total_frames, sample_step):
+                if not cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx):
+                    continue
+                ret, frame = cap.read()
+                if not ret:
+                    continue
+
+                processed_frame = analyzer.process_frame(frame)
+                timestamp = frame_idx / fps if fps else frame_idx
+                rows.append(analyzer.snapshot_metrics(timestamp))
+                if event_logger:
+                    event_logger.update(timestamp, collect_risk_state(analyzer))
+
+                if render_overlay:
+                    cv2.imshow("ML_Suicide Offline Preview", processed_frame)
+                    if cv2.waitKey(1) & 0xFF == 27:  # ESC
+                        break
+
+        while total_frames <= 0:
             ret, frame = cap.read()
             if not ret:
                 break
 
-            if frame_idx % max(1, sample_every) == 0:
+            if frame_idx % sample_step == 0:
                 processed_frame = analyzer.process_frame(frame)
                 timestamp = frame_idx / fps if fps else frame_idx
                 rows.append(analyzer.snapshot_metrics(timestamp))

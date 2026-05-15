@@ -9,6 +9,8 @@ import sys
 import tempfile
 import csv
 import json
+import contextlib
+import io
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 import pandas as pd
@@ -87,6 +89,122 @@ def _load_video_model_metrics() -> Dict[str, Optional[float]]:
         "recall": None,
         "f1_score": None,
     }
+
+
+def _coerce_numeric_mean(df: pd.DataFrame, column_name: str) -> float:
+    if column_name not in df.columns:
+        return 0.0
+    series = pd.to_numeric(df[column_name], errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
+    if series.empty:
+        return 0.0
+    return float(series.mean())
+
+
+def _coerce_numeric_max(df: pd.DataFrame, column_name: str) -> float:
+    if column_name not in df.columns:
+        return 0.0
+    series = pd.to_numeric(df[column_name], errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
+    if series.empty:
+        return 0.0
+    return float(series.max())
+
+
+def _safe_value_counts_ratio(series: pd.Series, value: str) -> float:
+    if series.empty:
+        return 0.0
+    normalized = series.fillna("").astype(str).str.strip().str.lower()
+    if normalized.empty:
+        return 0.0
+    return float((normalized == value).mean())
+
+
+def _max_contiguous_duration(labels: pd.Series, timestamps: pd.Series, target: str) -> float:
+    if labels.empty or timestamps.empty:
+        return 0.0
+
+    normalized_labels = labels.fillna("").astype(str).str.strip().str.lower().reset_index(drop=True)
+    time_values = pd.to_numeric(timestamps, errors="coerce").ffill().fillna(0.0).reset_index(drop=True)
+    if time_values.empty:
+        return 0.0
+
+    if len(time_values) > 1:
+        diffs = time_values.diff().dropna()
+        diffs = diffs[diffs > 0]
+        step = float(diffs.median()) if not diffs.empty else 0.0
+    else:
+        step = 0.0
+
+    best = 0.0
+    current = 0.0
+    for position, label in enumerate(normalized_labels):
+        if label == target:
+            if position == 0:
+                current = step
+            else:
+                delta = float(time_values.iloc[position] - time_values.iloc[position - 1])
+                current += delta if delta > 0 else step
+            best = max(best, current)
+        else:
+            current = 0.0
+    return float(best)
+
+
+def _prepare_video_model_input(df: pd.DataFrame, expected_cols: list[str]) -> np.ndarray:
+    working = df.copy()
+    if set(expected_cols).issubset(working.columns):
+        numeric_frame = working[expected_cols].apply(pd.to_numeric, errors="coerce").fillna(0.0)
+        return numeric_frame.mean(axis=0).to_numpy(dtype=float).reshape(1, -1)
+
+    aggregated = {column_name: 0.0 for column_name in expected_cols}
+
+    mean_columns = {
+        "ear",
+        "head_yaw",
+        "head_pitch",
+        "head_roll",
+        "looking_at_camera",
+        "head_down",
+        "head_stability",
+        "hands_detected",
+        "touching_face",
+    }
+    max_columns = {
+        "blink_count",
+        "gaze_away_time",
+        "head_down_duration",
+        "face_touch_count",
+        "emotion_duration",
+        "head_down_duration_max",
+    }
+
+    for column_name in mean_columns:
+        if column_name in aggregated:
+            aggregated[column_name] = _coerce_numeric_mean(working, column_name)
+
+    for column_name in max_columns:
+        if column_name in aggregated:
+            source_column = "head_down_duration" if column_name == "head_down_duration_max" else column_name
+            aggregated[column_name] = _coerce_numeric_max(working, source_column)
+
+    if "gaze_direction" in working.columns:
+        gaze_series = working["gaze_direction"]
+        for direction in ("center", "left", "right", "up", "down"):
+            column_name = f"gaze_{direction}_pct"
+            if column_name in aggregated:
+                aggregated[column_name] = _safe_value_counts_ratio(gaze_series, direction)
+
+        if "gaze_down_duration_max" in aggregated:
+            timestamps = working["timestamp"] if "timestamp" in working.columns else pd.Series(np.arange(len(working), dtype=float))
+            aggregated["gaze_down_duration_max"] = _max_contiguous_duration(gaze_series, timestamps, "down")
+
+    if "emotion" in working.columns:
+        emotion_series = working["emotion"]
+        for emotion_name in ("angry", "disgust", "fear", "happy", "neutral", "sad", "surprise"):
+            column_name = f"emotion_{emotion_name}_pct"
+            if column_name in aggregated:
+                aggregated[column_name] = _safe_value_counts_ratio(emotion_series, emotion_name)
+
+    return np.asarray([[float(aggregated[column_name]) for column_name in expected_cols]], dtype=float)
 
 
 def _ensure_protobuf_runtime_compat() -> None:
@@ -213,7 +331,8 @@ try:
 except Exception as e:
     # If that fails, provide a lightweight fallback using the existing CV pipeline
     try:
-        from src.pipeline.cv_pipeline.extract_visual_features import process_video_file as _process_video_file
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            from src.pipeline.cv_pipeline.extract_visual_features import process_video_file as _process_video_file
 
         def process_video_file(*args, **kwargs):
             return _process_video_file(*args, **kwargs)
@@ -331,13 +450,7 @@ except Exception as e:
                 # If model wrapper provides expected feature order, use it.
                 if hasattr(self.model, "feature_cols") and getattr(self.model, "feature_cols"):
                     expected_cols = list(getattr(self.model, "feature_cols"))
-                    missing = [c for c in expected_cols if c not in df.columns]
-                    if missing:
-                        # Keep inference resilient when fallback extractor outputs
-                        # fewer columns than the original training pipeline.
-                        for col in missing:
-                            df[col] = 0.0
-                    X = df[expected_cols].fillna(0.0).mean(axis=0).values.reshape(1, -1)
+                    X = _prepare_video_model_input(df, expected_cols)
                 else:
                     num_cols = df.select_dtypes(include=[np.number]).columns.tolist()
                     if not num_cols:
@@ -411,10 +524,7 @@ except Exception as e:
                 def predict_from_csv(self, df: pd.DataFrame):
                     if hasattr(self.model, "feature_cols") and getattr(self.model, "feature_cols"):
                         cols = list(getattr(self.model, "feature_cols"))
-                        for c in cols:
-                            if c not in df.columns:
-                                df[c] = 0.0
-                        X = df[cols].fillna(0.0).mean(axis=0).values.reshape(1, -1)
+                        X = _prepare_video_model_input(df, cols)
                     else:
                         num_cols = df.select_dtypes(include=[np.number]).columns.tolist()
                         if not num_cols:
@@ -441,7 +551,7 @@ def process_video_for_prediction(
     video_path: str,
     output_dir: Optional[str] = None,
     sample_every: int = 3,
-    use_emotions: Optional[bool] = None
+    use_emotions: Optional[bool] = False
 ) -> Tuple[Optional[str], Optional[str]]:
     """
     Обрабатывает видео и создает CSV с видео фичами.
@@ -476,14 +586,15 @@ def process_video_for_prediction(
         csv_path = output_dir_path / f"{base_name}.csv"
         
         # Обрабатываем видео
-        process_video_file(
-            video_path=str(video_file),
-            output_csv=str(csv_path),
-            sample_every=sample_every,
-            render_overlay=False,
-            use_emotions=use_emotions,
-            event_log_path=None
-        )
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            process_video_file(
+                video_path=str(video_file),
+                output_csv=str(csv_path),
+                sample_every=sample_every,
+                render_overlay=False,
+                use_emotions=use_emotions,
+                event_log_path=None
+            )
         
         if csv_path.exists():
             return str(csv_path), None

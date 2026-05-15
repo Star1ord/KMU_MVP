@@ -179,7 +179,7 @@ async def _analyze_uploaded_video(
     skip_transcription: bool = False,
     label: int | None = None,
     include_cv: bool = True,
-    include_cv_audio: bool = True,
+    include_cv_audio: bool = False,
     whisper_model: str = "medium",
     video_sample_every: int = 8,
     cv_audio_sample_rate: float = 0.25,
@@ -245,7 +245,7 @@ async def predict(
     skip_transcription: bool = False,
     label: int | None = None,
     include_cv: bool = True,
-    include_cv_audio: bool = True,
+    include_cv_audio: bool = False,
     video_sample_every: int = 8,
     cv_audio_sample_rate: float = 0.25,
 ):
@@ -360,12 +360,16 @@ async def test_nlp(
         prediction = raw.get("prediction")
         risk_score = raw.get("risk_score")
         risk_level = raw.get("risk_level")
-        segments = raw.get("segments", [])
-        transcript = " ".join(
-            str(seg.get("text", "")).strip()
-            for seg in segments
-            if str(seg.get("text", "")).strip()
-        ).strip()
+        segments = raw.get("segments") or raw.get("text_segments") or []
+        transcript = (
+            str(raw.get("transcript") or "").strip()
+            or str(raw.get("full_text") or "").strip()
+            or " ".join(
+                str(seg.get("text", "")).strip()
+                for seg in segments
+                if str(seg.get("text", "")).strip()
+            ).strip()
+        )
 
         # 0 = контрольная группа, 1 = экспериментальная (risk)
         if prediction == 1:
@@ -376,7 +380,7 @@ async def test_nlp(
             prediction_label = None
 
         output = {
-            "success": bool(raw.get("success", False)),
+            "success": bool(raw.get("nlp_success", raw.get("success", False))),
             "prediction": prediction,
             "prediction_label": prediction_label,
             "risk_score": risk_score,
@@ -432,7 +436,7 @@ async def test_cv(
             video_path=str(tmp_path),
             output_dir=None,
             sample_every=max(1, int(sample_every)),
-            use_emotions=None,
+            use_emotions=False,
         )
 
         if video_err or not csv_path:
@@ -873,7 +877,7 @@ async def _analyze_saved_video(
     skip_transcription: bool = False,
     label: int | None = None,
     include_cv: bool = True,
-    include_cv_audio: bool = True,
+    include_cv_audio: bool = False,
     whisper_model: str = "medium",
     video_sample_every: int = 8,
     cv_audio_sample_rate: float = 0.25,
@@ -1075,7 +1079,7 @@ async def test_anomaly_video(
             video_path=str(tmp_path),
             output_dir=None,
             sample_every=max(1, int(sample_every)),
-            use_emotions=None,
+            use_emotions=False,
         )
         if video_err or not csv_path:
             return {

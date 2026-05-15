@@ -36,6 +36,9 @@ const acousticInsightsEl = document.getElementById('acousticInsights')
 const transcriptTextEl = document.getElementById('transcriptText')
 const textMarkerInfoEl = document.getElementById('textMarkerInfo')
 const influenceTableWrapEl = document.getElementById('influenceTableWrap')
+const videoReviewSectionEl = document.getElementById('video-markers')
+const acousticReviewSectionEl = document.getElementById('audio-text')
+const textReviewSectionEl = document.getElementById('text-nlp')
 
 const pipelineStageEl = document.getElementById('pipelineStage')
 const pipelineBarEl = document.getElementById('pipelineBar')
@@ -49,7 +52,7 @@ const pipelineNodes = {
 }
 
 const MODE_CONFIGS = [
-  { id: 'all', label: 'Combined analysis', description: 'Runs text, video, and CV+audio models together and compares their outputs.', endpoint: '/predict?include_cv=true&include_cv_audio=true&video_sample_every=8&cv_audio_sample_rate=0.25', method: 'POST', needsFile: true, uploadMode: 'raw' },
+  { id: 'all', label: 'Combined analysis', description: 'Runs the text and video models together and compares their outputs.', endpoint: '/predict?include_cv=true&include_cv_audio=false&video_sample_every=12', method: 'POST', needsFile: true, uploadMode: 'raw' },
   { id: 'nlp', label: 'Text only', description: 'Uses the transcript to estimate risk from language patterns.', endpoint: '/test/nlp', method: 'POST', needsFile: true },
   { id: 'cv', label: 'Video only', description: 'Checks visual cues from the interview video.', endpoint: '/test/cv?sample_every=8', method: 'POST', needsFile: true },
   { id: 'cv_audio', label: 'Face + voice model', description: 'Combines facial and voice signals into one session-level score.', endpoint: '/predict/cv-audio?sample_rate=0.25', method: 'POST', needsFile: true },
@@ -255,6 +258,44 @@ function buildModeOptions() {
 function getSelectedMode() {
   const selected = document.querySelector('input[name="mode"]:checked')
   return MODE_CONFIGS.find(m => m.id === selected?.value) || MODE_CONFIGS[0]
+}
+
+function setSectionVisible(element, visible) {
+  if(!element) return
+  element.classList.toggle('hidden', !visible)
+}
+
+function updateReviewVisibility(modeCfg, context = {}) {
+  const modeId = modeCfg?.id || 'all'
+  const hasVideo = Boolean(context.hasVideo)
+  const hasAudio = Boolean(context.hasAudio)
+  const hasText = Boolean(context.hasText)
+
+  let showVideo = false
+  let showAudio = false
+  let showText = false
+
+  if(modeId === 'all') {
+    showVideo = true
+    showAudio = hasAudio
+    showText = true
+  } else if(modeId === 'nlp' || modeId === 'deception' || modeId === 'anomaly_text') {
+    showText = true
+  } else if(modeId === 'cv' || modeId === 'anomaly_video') {
+    showVideo = true
+  } else if(modeId === 'cv_audio' || modeId === 'anomaly_audio') {
+    showAudio = true
+  } else if(modeId === 'emotion_av') {
+    showVideo = hasVideo
+    showAudio = true
+  }
+
+  if(modeId === 'cv' && !hasVideo) showVideo = true
+  if(modeId === 'nlp' && !hasText) showText = true
+
+  setSectionVisible(videoReviewSectionEl, showVideo)
+  setSectionVisible(acousticReviewSectionEl, showAudio)
+  setSectionVisible(textReviewSectionEl, showText)
 }
 
 function extractModelRecords(data, modeCfg) {
@@ -1109,6 +1150,13 @@ function renderAll(data, modeCfg, rawPayload) {
   const videoTimeline = extractVideoTimelineData(data)
   const videoMarkers = extractVideoMarkers(data)
   const acousticInterpretation = extractAcousticInterpretation(data)
+  const textPayload = buildTextPayload(data, rawPayload, score)
+
+  updateReviewVisibility(modeCfg, {
+    hasVideo: Boolean(videoTimeline.points.length || videoMarkers.length || pickRecordScore(records, ['cv', 'video']) !== null),
+    hasAudio: Boolean(acousticInterpretation.supported || pickRecordScore(records, ['cv_audio', 'anomaly_audio']) !== null),
+    hasText: Boolean(textPayload.text || textPayload.segments.length)
+  })
 
   renderGauge(score)
   setRiskBadge(level)
@@ -1128,7 +1176,6 @@ function renderAll(data, modeCfg, rawPayload) {
     supported: acousticInterpretation.supported
   })
 
-  const textPayload = buildTextPayload(data, rawPayload, score)
   renderTranscript(textPayload)
   renderInfluenceTable(data)
 
@@ -1165,6 +1212,7 @@ function clearUI() {
   clearCharts()
   resetPipelineState()
   setStatus('Ready.')
+  updateReviewVisibility(getSelectedMode(), {})
 }
 
 async function sendRequest(modeCfg) {
@@ -1191,7 +1239,7 @@ async function sendRequest(modeCfg) {
 
   const url = apiBase + modeCfg.endpoint
   startPipelineAnimation()
-  setStatus(`Uploading the video and starting "${modeCfg.label}"...`)
+  setStatus(`Running "${modeCfg.label}"...`)
 
   const startedAt = performance.now()
   try {
@@ -1234,7 +1282,7 @@ async function sendRequest(modeCfg) {
       return
     }
     finishPipeline(true)
-    setStatus(`${modeCfg.label} completed in ${elapsedMs} ms.`, 'ok')
+    setStatus('Analysis completed.', 'ok')
   } catch (err) {
     finishPipeline(false)
     setStatus(`Could not send the request: ${err.message}`, 'error')
@@ -1299,4 +1347,5 @@ transcriptTextEl.addEventListener('click', event => {
 })
 
 buildModeOptions()
+modeOptionsEl.addEventListener('change', () => updateReviewVisibility(getSelectedMode(), {}))
 clearUI()
