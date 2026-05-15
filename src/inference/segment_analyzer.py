@@ -12,8 +12,6 @@ This module provides:
 
 import numpy as np
 import pandas as pd
-import joblib
-import os
 from dataclasses import dataclass
 from typing import List, Dict, Optional, Tuple
 
@@ -21,6 +19,7 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from utils import MODELS_DIR, DATA_DIR
+from src.utils.model_loading import safe_load_serialized_model
 
 
 @dataclass
@@ -60,12 +59,14 @@ class SegmentAnalyzer:
             model_path: Path to segment_model.pkl. If None, uses default location.
         """
         if model_path is None:
-            model_path = os.path.join(MODELS_DIR, 'segment_model.pkl')
+            model_path = Path(MODELS_DIR) / 'segment_model.pkl'
+        else:
+            model_path = Path(model_path)
         
-        if not os.path.exists(model_path):
+        if not model_path.exists():
             raise FileNotFoundError(f"Segment model not found: {model_path}")
         
-        model_package = joblib.load(model_path)
+        model_package = safe_load_serialized_model(model_path, model_name="segment_model")
         
         self.model = model_package['model']
         self.scaler = model_package['scaler']

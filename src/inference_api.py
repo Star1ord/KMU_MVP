@@ -10,7 +10,6 @@ import os
 import json
 import numpy as np
 import pandas as pd
-import joblib
 from pathlib import Path
 from typing import Tuple, Dict, Any, Optional
 from datetime import datetime
@@ -21,6 +20,7 @@ warnings.filterwarnings('ignore')
 import sys
 sys.path.insert(0, str(Path(__file__).parent))
 from utils import DATA_DIR, MODELS_DIR, RESULTS_DIR
+from src.utils.model_loading import safe_load_serialized_model
 
 
 class InferenceEngine:
@@ -53,7 +53,7 @@ class InferenceEngine:
             raise FileNotFoundError(f"Model not found: {model_path}")
         
         # Load model
-        model = joblib.load(model_path)
+        model = safe_load_serialized_model(model_path, model_name=model_type)
         
         # Load metadata
         metadata = {}

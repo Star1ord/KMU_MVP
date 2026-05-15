@@ -305,8 +305,23 @@ def merge_features(
     limit: Optional[int] = None,
     audio_dir: str = 'data/raw/audio_wav',
 ) -> pd.DataFrame:
-    segments_df = pd.read_csv(segments_metadata_path)
-    opensmile_df = pd.read_csv(opensmile_features_path)
+    segments_path = Path(segments_metadata_path)
+    opensmile_path = Path(opensmile_features_path)
+    output_csv_path = Path(output_path)
+
+    if not segments_path.exists():
+        raise FileNotFoundError(
+            f"segments_metadata.csv not found at {segments_path}. "
+            "WhisperX transcription or audio segmentation likely failed."
+        )
+    if not opensmile_path.exists():
+        raise FileNotFoundError(
+            f"openSMILE features file not found at {opensmile_path}. "
+            "Segment feature extraction likely failed."
+        )
+
+    segments_df = pd.read_csv(segments_path)
+    opensmile_df = pd.read_csv(opensmile_path)
 
     segments_df = filter_by_file_ids(segments_df, file_ids)
     opensmile_df = filter_by_file_ids(opensmile_df, file_ids)
@@ -317,8 +332,8 @@ def merge_features(
     available_ids = set(segments_df['file_id']).intersection(set(opensmile_df['file_id']))
     if not available_ids:
         print("warning: no file_id intersection between segments and features")
-        if os.path.exists(output_path):
-            return pd.read_csv(output_path)
+        if output_csv_path.exists():
+            return pd.read_csv(output_csv_path)
         return pd.DataFrame()
 
     def normalize_file_id(file_id: str) -> str:
@@ -334,8 +349,8 @@ def merge_features(
     available_ids_normalized = set(segments_df['file_id_normalized']).intersection(set(opensmile_df['file_id_normalized']))
     if not available_ids_normalized:
         print("warning: no file_id intersection after normalization")
-        if os.path.exists(output_path):
-            return pd.read_csv(output_path)
+        if output_csv_path.exists():
+            return pd.read_csv(output_csv_path)
         return pd.DataFrame()
     
     segments_df = segments_df[segments_df['file_id_normalized'].isin(available_ids_normalized)]
@@ -360,16 +375,16 @@ def merge_features(
     
     merged_df = add_text_features(merged_df, language=language)
 
-    if os.path.exists(output_path):
-        existing_merged = pd.read_csv(output_path)
+    if output_csv_path.exists():
+        existing_merged = pd.read_csv(output_csv_path)
         new_file_ids = set(merged_df['file_id'].unique())
         existing_merged = existing_merged[~existing_merged['file_id'].isin(new_file_ids)]
         merged_df = pd.concat([existing_merged, merged_df], ignore_index=True)
 
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    merged_df.to_csv(output_path, index=False, encoding='utf-8')
+    output_csv_path.parent.mkdir(parents=True, exist_ok=True)
+    merged_df.to_csv(output_csv_path, index=False, encoding='utf-8')
 
-    print(f"merged dataset saved to {output_path}")
+    print(f"merged dataset saved to {output_csv_path}")
     print(f"total rows: {len(merged_df)}")
     print(f"total features: {len(merged_df.columns)}")
     print(f"unique videos: {merged_df['file_id'].nunique()}")
@@ -438,4 +453,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-

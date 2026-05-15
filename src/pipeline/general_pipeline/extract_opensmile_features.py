@@ -1,6 +1,8 @@
 import os
+import platform
 import subprocess
 import argparse
+import sys
 from pathlib import Path
 from typing import List, Optional
 
@@ -8,23 +10,52 @@ import pandas as pd
 from tqdm import tqdm
 import numpy as np
 
+REPO_ROOT = Path(__file__).resolve().parents[3]
+SRC_ROOT = REPO_ROOT / "src"
+for path in (REPO_ROOT, SRC_ROOT):
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))
 
-def find_smilextract_binary(opensmile_dir: str = "src/pipeline/opensmile") -> str:
+from src.utils.paths import OPENSMILE_DIR
+
+
+def _is_supported_smile_binary(path: Path) -> bool:
+    if not path.exists() or not path.is_file():
+        return False
+
+    try:
+        header = path.read_bytes()[:4]
+    except OSError:
+        return False
+
+    system = platform.system()
+    if system == "Windows":
+        return header.startswith(b"MZ")
+    if system == "Darwin":
+        return header in {b"\xcf\xfa\xed\xfe", b"\xfe\xed\xfa\xcf", b"\xca\xfe\xba\xbe"}
+    return header.startswith(b"\x7fELF")
+
+
+def find_smilextract_binary(opensmile_dir: str = str(OPENSMILE_DIR)) -> str:
     possible_paths = [
+        os.path.join(opensmile_dir, "bin", "SMILExtract.exe"),
         os.path.join(opensmile_dir, "bin", "SMILExtract"),
         os.path.join(opensmile_dir, "build", "progsrc", "smilextract", "SMILExtract"),
+        os.path.join(opensmile_dir, "build", "progsrc", "smilextract", "SMILExtract.exe"),
         os.path.join(opensmile_dir, "build", "bin", "SMILExtract"),
+        os.path.join(opensmile_dir, "build", "bin", "SMILExtract.exe"),
         "SMILExtract"
     ]
     
     for path in possible_paths:
-        if os.path.exists(path) and os.access(path, os.X_OK):
-            return os.path.abspath(path)
+        candidate = Path(path)
+        if candidate.exists() and os.access(candidate, os.X_OK) and _is_supported_smile_binary(candidate):
+            return str(candidate.resolve())
     
     raise FileNotFoundError(f"smilextract not found. check paths: {possible_paths}")
 
 
-def find_egemaps_config(opensmile_dir: str = "src/pipeline/opensmile") -> str:
+def find_egemaps_config(opensmile_dir: str = str(OPENSMILE_DIR)) -> str:
     possible_versions = ["v02", "v01b", "v01a"]
     
     for version in possible_versions:
@@ -147,37 +178,62 @@ def parse_opensmile_csv(csv_path: str) -> dict:
 # --- Librosa-based lightweight fallback for environments without OpenSMILE ---
 def extract_features_librosa_segment(segment_file: str) -> dict:
     try:
-        import librosa
+        import soundfile as sf
+        import torch
+        import torchaudio
     except ImportError:
-        raise ImportError("librosa is required for the lightweight fallback. Install with `pip install librosa soundfile`")
+        raise ImportError(
+            "soundfile and torchaudio are required for the lightweight fallback. "
+            "Install with `pip install soundfile torchaudio`"
+        )
 
-    y, sr = librosa.load(segment_file, sr=None)
+    y, sr = sf.read(segment_file, always_2d=False)
+    if getattr(y, "ndim", 1) > 1:
+        y = y.mean(axis=1)
+
+    y = np.asarray(y, dtype=np.float32)
+    if y.size == 0:
+        return {}
+
+    waveform = torch.from_numpy(y).unsqueeze(0)
     features = {}
 
-    # MFCCs (13 coefficients): mean and std
-    mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
+    mfcc_transform = torchaudio.transforms.MFCC(
+        sample_rate=int(sr),
+        n_mfcc=13,
+        melkwargs={
+            "n_fft": 400,
+            "hop_length": 160,
+            "n_mels": 40,
+            "center": False,
+        },
+    )
+    mfcc = mfcc_transform(waveform).squeeze(0).detach().cpu().numpy()
     for i in range(mfcc.shape[0]):
         coef = mfcc[i]
         features[f"mfcc_{i+1}_mean"] = float(np.mean(coef))
         features[f"mfcc_{i+1}_std"] = float(np.std(coef)) if len(coef) > 1 else 0.0
 
-    # spectral centroid
-    sc = librosa.feature.spectral_centroid(y=y, sr=sr)
-    features["spectral_centroid_mean"] = float(np.mean(sc)) if sc.size else 0.0
-    features["spectral_centroid_std"] = float(np.std(sc)) if sc.size else 0.0
+    # Simple spectral centroid via FFT on the full segment
+    spectrum = np.abs(np.fft.rfft(y))
+    freqs = np.fft.rfftfreq(len(y), d=1.0 / float(sr))
+    if spectrum.size and np.sum(spectrum) > 0:
+        centroid = float(np.sum(freqs * spectrum) / np.sum(spectrum))
+    else:
+        centroid = 0.0
+    features["spectral_centroid_mean"] = centroid
+    features["spectral_centroid_std"] = 0.0
 
     # zero crossing rate and RMS
-    zcr = librosa.feature.zero_crossing_rate(y)
-    features["zero_crossing_rate_mean"] = float(np.mean(zcr)) if zcr.size else 0.0
-    rms = librosa.feature.rms(y=y)
-    features["rms_mean"] = float(np.mean(rms)) if rms.size else 0.0
+    if len(y) > 1:
+        zcr = np.mean((y[:-1] * y[1:]) < 0)
+    else:
+        zcr = 0.0
+    features["zero_crossing_rate_mean"] = float(zcr)
+    features["rms_mean"] = float(np.sqrt(np.mean(np.square(y)))) if y.size else 0.0
 
-    # tempo (may fail for short segments)
-    try:
-        tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
-        features["tempo"] = float(tempo)
-    except Exception:
-        features["tempo"] = 0.0
+    # Lightweight fallback does not estimate tempo robustly for short segments.
+    features["tempo"] = 0.0
 
     return features
 
@@ -218,7 +274,7 @@ def batch_extract_features_librosa(
         return pd.DataFrame()
 
     all_features = []
-    for video_dir in tqdm(video_dirs, desc="extracting features (librosa)"):
+    for video_dir in tqdm(video_dirs, desc="extracting features (fallback)"):
         segment_files = sorted([
             f for f in video_dir.iterdir()
             if f.is_file() and f.suffix == ".wav" and (f.stem.startswith("segment_") or f.stem.isdigit())
@@ -252,7 +308,7 @@ def batch_extract_features_librosa(
             print("returning existing csv unchanged")
         return existing_df if existing_df is not None else pd.DataFrame()
 
-    print(f"successfully extracted features from {len(all_features)} segments (librosa)")
+    print(f"successfully extracted features from {len(all_features)} segments (fallback)")
 
     features_df = pd.DataFrame(all_features)
 
@@ -270,7 +326,7 @@ def batch_extract_features_librosa(
 def batch_extract_features(
     segments_dir: str,
     output_dir: str,
-    opensmile_dir: str = "src/pipeline/opensmile",
+    opensmile_dir: str = str(OPENSMILE_DIR),
     file_ids: Optional[List[str]] = None,
     limit: Optional[int] = None,
     force: bool = False,
@@ -294,7 +350,7 @@ def batch_extract_features(
         print(f"using config: {config_path}")
         using_smile = True
     except FileNotFoundError:
-        print(f"warning: SMILExtract not found in {opensmile_dir}. Falling back to lightweight librosa features.")
+        print(f"warning: SMILExtract not found in {opensmile_dir}. Falling back to lightweight acoustic features.")
         using_smile = False
 
     if not segments_path.exists():
@@ -421,4 +477,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-

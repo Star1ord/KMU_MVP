@@ -155,6 +155,88 @@ def _ensure_haar():
     return cascade
 
 
+def _read_video_rotation(video_path: str) -> int:
+    cmd = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream_tags=rotate:stream_side_data=rotation",
+        "-of",
+        "default=nw=1:nk=1",
+        str(video_path),
+    ]
+
+    try:
+        completed = subprocess.run(
+            cmd,
+            capture_output=True,
+            check=False,
+            text=True,
+        )
+    except FileNotFoundError:
+        return 0
+
+    values: list[int] = []
+    for line in completed.stdout.splitlines():
+        candidate = line.strip()
+        if not candidate:
+            continue
+        try:
+            values.append(int(round(float(candidate))))
+        except ValueError:
+            continue
+
+    if not values:
+        return 0
+
+    return values[-1] % 360
+
+
+def _apply_rotation(frame: np.ndarray, rotation_degrees: int) -> np.ndarray:
+    import cv2
+
+    rotation = rotation_degrees % 360
+    if rotation == 90:
+        return cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+    if rotation == 180:
+        return cv2.rotate(frame, cv2.ROTATE_180)
+    if rotation == 270:
+        return cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+    return frame
+
+
+def _extract_visual_crop(frame_bgr: np.ndarray) -> Optional[np.ndarray]:
+    bbox = _detect_face_bbox_bgr(frame_bgr)
+    if bbox is not None:
+        x1, y1, x2, y2 = bbox
+        x1 = max(0, x1)
+        y1 = max(0, y1)
+        x2 = min(frame_bgr.shape[1], x2)
+        y2 = min(frame_bgr.shape[0], y2)
+        crop = frame_bgr[y1:y2, x1:x2]
+        if crop.size > 0 and crop.shape[0] >= 50 and crop.shape[1] >= 50:
+            return crop
+
+    height, width = frame_bgr.shape[:2]
+    side = min(height, width)
+    if side < 50:
+        return None
+
+    side = max(50, int(side * 0.82))
+    side = min(side, height, width)
+    x1 = max(0, (width - side) // 2)
+    y1 = max(0, (height - side) // 2)
+    x2 = min(width, x1 + side)
+    y2 = min(height, y1 + side)
+    crop = frame_bgr[y1:y2, x1:x2]
+    if crop.size == 0:
+        return None
+    return crop
+
+
 def _extract_audio_mfcc(
     video_path: str,
     sr: int = 16000,
@@ -165,10 +247,13 @@ def _extract_audio_mfcc(
     Returns shape: (n_mfcc,).
     """
     try:
-        import librosa
+        import soundfile as sf
+        import torch
+        import torchaudio
     except Exception as e:
         raise ImportError(
-            "librosa is required for MFCC extraction. Install: pip install librosa soundfile"
+            "soundfile and torchaudio are required for MFCC extraction. "
+            "Install: pip install soundfile torchaudio"
         ) from e
 
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
@@ -193,15 +278,40 @@ def _extract_audio_mfcc(
         ]
         subprocess.run(cmd, check=True)
 
-        y, _sr = librosa.load(wav_path, sr=sr, mono=True)
-        if y is None or len(y) == 0:
+        waveform, loaded_sr = sf.read(wav_path, always_2d=False)
+        if waveform is None or len(waveform) == 0:
             raise ValueError("empty audio after ffmpeg extraction")
 
-        mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=n_mfcc)
-        if mfcc.size == 0:
+        if getattr(waveform, "ndim", 1) > 1:
+            waveform = waveform.mean(axis=1)
+
+        waveform = waveform.astype(np.float32)
+        if waveform.size == 0:
+            raise ValueError("empty waveform after mono conversion")
+
+        tensor = torch.from_numpy(waveform).unsqueeze(0)
+        transform = torchaudio.transforms.MFCC(
+            sample_rate=int(loaded_sr),
+            n_mfcc=n_mfcc,
+            melkwargs={
+                "n_fft": 400,
+                "hop_length": 160,
+                "n_mels": 40,
+                "center": False,
+            },
+        )
+        mfcc = transform(tensor)
+        if mfcc.numel() == 0:
             raise ValueError("mfcc extraction produced empty output")
 
-        return mfcc.mean(axis=1).astype(np.float32)
+        return (
+            mfcc.mean(dim=-1)
+            .squeeze(0)
+            .detach()
+            .cpu()
+            .numpy()
+            .astype(np.float32)
+        )
     finally:
         try:
             os.unlink(wav_path)
@@ -276,6 +386,7 @@ def _extract_video_features_fallback(
     if not cap.isOpened():
         raise RuntimeError(f"could not open video: {video_path}")
 
+    rotation_degrees = _read_video_rotation(video_path)
     fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
     interval = max(1, int(math.floor(fps / max(sample_rate_fps, 1e-6))))
 
@@ -290,28 +401,21 @@ def _extract_video_features_fallback(
                 break
 
             if frame_idx % interval == 0:
-                bbox = _detect_face_bbox_bgr(frame)
-                if bbox is not None:
-                    x1, y1, x2, y2 = bbox
-                    x1 = max(0, x1)
-                    y1 = max(0, y1)
-                    x2 = min(frame.shape[1], x2)
-                    y2 = min(frame.shape[0], y2)
-                    crop = frame[y1:y2, x1:x2]
+                frame = _apply_rotation(frame, rotation_degrees)
+                crop = _extract_visual_crop(frame)
+                if crop is not None:
+                    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+                    gray = cv2.resize(gray, (64, 64), interpolation=cv2.INTER_LINEAR)
+                    gray_f = gray.astype(np.float32) / 255.0
 
-                    if crop.size > 0 and crop.shape[0] >= 50 and crop.shape[1] >= 50:
-                        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-                        gray = cv2.resize(gray, (64, 64), interpolation=cv2.INTER_LINEAR)
-                        gray_f = gray.astype(np.float32) / 255.0
+                    gx = cv2.Sobel(gray_f, cv2.CV_32F, 1, 0, ksize=3)
+                    gy = cv2.Sobel(gray_f, cv2.CV_32F, 0, 1, ksize=3)
+                    mag = cv2.magnitude(gx, gy)
+                    mag = np.clip(mag, 0.0, 1.0)
 
-                        gx = cv2.Sobel(gray_f, cv2.CV_32F, 1, 0, ksize=3)
-                        gy = cv2.Sobel(gray_f, cv2.CV_32F, 0, 1, ksize=3)
-                        mag = cv2.magnitude(gx, gy)
-                        mag = np.clip(mag, 0.0, 1.0)
-
-                        f = np.concatenate([gray_f.reshape(-1), mag.reshape(-1)], axis=0)
-                        feats.append(f.astype(np.float32))
-                        processed += 1
+                    f = np.concatenate([gray_f.reshape(-1), mag.reshape(-1)], axis=0)
+                    feats.append(f.astype(np.float32))
+                    processed += 1
 
             frame_idx += 1
     finally:
@@ -380,6 +484,7 @@ def _extract_video_vgg_features(
     if not cap.isOpened():
         raise RuntimeError(f"could not open video: {video_path}")
 
+    rotation_degrees = _read_video_rotation(video_path)
     fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
     interval = max(1, int(math.floor(fps / max(sample_rate_fps, 1e-6))))
 
@@ -415,26 +520,19 @@ def _extract_video_vgg_features(
                 break
 
             if frame_idx % interval == 0:
-                bbox = _detect_face_bbox_bgr(frame)
-                if bbox is not None:
-                    x1, y1, x2, y2 = bbox
-                    x1 = max(0, x1)
-                    y1 = max(0, y1)
-                    x2 = min(frame.shape[1], x2)
-                    y2 = min(frame.shape[0], y2)
-                    crop = frame[y1:y2, x1:x2]
+                frame = _apply_rotation(frame, rotation_degrees)
+                crop = _extract_visual_crop(frame)
+                if crop is not None:
+                    rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+                    rgb = cv2.resize(rgb, (224, 224), interpolation=cv2.INTER_LINEAR)
+                    x = np.expand_dims(rgb.astype(np.float32), axis=0)
+                    x = preprocess_input(x)
 
-                    if crop.size > 0 and crop.shape[0] >= 50 and crop.shape[1] >= 50:
-                        rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
-                        rgb = cv2.resize(rgb, (224, 224), interpolation=cv2.INTER_LINEAR)
-                        x = np.expand_dims(rgb.astype(np.float32), axis=0)
-                        x = preprocess_input(x)
-
-                        f1 = fc1.predict(x, verbose=0)
-                        f2 = fc2.predict(x, verbose=0)
-                        f = np.concatenate([f1, f2], axis=1).reshape(-1)
-                        feats.append(f.astype(np.float32))
-                        processed += 1
+                    f1 = fc1.predict(x, verbose=0)
+                    f2 = fc2.predict(x, verbose=0)
+                    f = np.concatenate([f1, f2], axis=1).reshape(-1)
+                    feats.append(f.astype(np.float32))
+                    processed += 1
 
             frame_idx += 1
     finally:

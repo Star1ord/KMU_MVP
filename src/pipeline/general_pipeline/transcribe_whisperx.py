@@ -9,6 +9,8 @@ from typing import List, Optional
 # КРИТИЧНО: Устанавливаем переменные окружения ДО импорта torch
 # Это предотвращает проблемы с mutex lock на macOS
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+os.environ.setdefault("TRANSFORMERS_NO_TF", "1")
+os.environ.setdefault("USE_TF", "0")
 if platform.system() == "Darwin":
     os.environ.setdefault("OMP_NUM_THREADS", "1")
     os.environ.setdefault("MKL_NUM_THREADS", "1")
@@ -17,6 +19,12 @@ if platform.system() == "Darwin":
     # Отключаем MPS для предотвращения проблем с mutex
     os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
     os.environ.setdefault("PYTORCH_MPS_HIGH_WATERMARK_RATIO", "0.0")
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+SRC_ROOT = REPO_ROOT / "src"
+for path in (REPO_ROOT, SRC_ROOT):
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))
 
 import torch
 
@@ -56,11 +64,13 @@ patch_torch_load()
 
 import psutil
 from tqdm import tqdm
-import whisperx
 
-_project_root = Path(__file__).parent.parent.parent
-if str(_project_root) not in sys.path:
-    sys.path.insert(0, str(_project_root))
+WHISPERX_IMPORT_ERROR: Exception | None = None
+try:
+    import whisperx
+except Exception as exc:  # pragma: no cover - import-time dependency guard
+    whisperx = None  # type: ignore[assignment]
+    WHISPERX_IMPORT_ERROR = exc
 
 from pipeline.media_utils import (
     MediaSample,
@@ -68,6 +78,21 @@ from pipeline.media_utils import (
     filter_samples,
     migrate_transcript,
 )
+from src.utils.paths import AUDIO_WAV_DIR, TRANSCRIPTS_DIR
+
+
+def _describe_whisperx_import_error(exc: Exception | None) -> str:
+    if isinstance(exc, ModuleNotFoundError) and exc.name == "pkg_resources":
+        return (
+            "WhisperX import failed because `pkg_resources` is missing. "
+            "Install a setuptools build that still provides it, for example "
+            "`pip install \"setuptools<81\"`."
+        )
+
+    if exc is None:
+        return "WhisperX import failed for an unknown reason."
+
+    return f"WhisperX import failed: {type(exc).__name__}: {exc}"
 
 
 def detect_environment() -> dict:
@@ -77,14 +102,14 @@ def detect_environment() -> dict:
     if is_mac or total_memory_gb <= 16:
         return {
             "mode": "lightweight",
-            "description": "Mac / ограниченная память",
+            "description": "Mac or low-memory environment",
             "default_model": "medium",
             "batch_size": 4,
         }
 
     return {
         "mode": "server",
-        "description": "Сервер / мощное железо",
+        "description": "Server or higher-memory environment",
         "default_model": "medium",
         "batch_size": 16,
     }
@@ -131,6 +156,7 @@ def transcribe_audio(
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     try:
+        print(f"WhisperX started: {sample.file_id}", flush=True)
         print(f"processing {sample.file_id}...", flush=True)
         
         # Загрузка аудио с обработкой ошибок
@@ -180,6 +206,7 @@ def transcribe_audio(
         try:
             with open(output_path, "w", encoding="utf-8") as fp:
                 json.dump(aligned, fp, ensure_ascii=False, indent=2)
+            print(f"WhisperX finished: {sample.file_id}", flush=True)
             print(f"done: {sample.file_id}", flush=True)
             return True
         except Exception as exc:
@@ -205,6 +232,9 @@ def batch_transcribe(
     limit: Optional[int],
     force: bool,
 ) -> None:
+    if whisperx is None:
+        raise RuntimeError(_describe_whisperx_import_error(WHISPERX_IMPORT_ERROR))
+
     env = detect_environment()
     model_name = model_name or env["default_model"]
     batch_size = batch_size or env["batch_size"]
@@ -215,6 +245,8 @@ def batch_transcribe(
     print(f"batch size: {batch_size}")
     print(f"device: {device}, compute_type: {compute_type}")
     print("================\n")
+    print(f"WhisperX input dir: {input_dir}")
+    print(f"WhisperX output dir: {output_dir}")
 
     samples = discover_media(input_dir)
     if not samples:
@@ -293,8 +325,8 @@ def batch_transcribe(
 
 def main():
     parser = argparse.ArgumentParser(description="transcribe audio with whisperx")
-    parser.add_argument("--input-dir", type=str, default="data/audio_wav")
-    parser.add_argument("--output-dir", type=str, default="data/transcripts")
+    parser.add_argument("--input-dir", type=str, default=str(AUDIO_WAV_DIR))
+    parser.add_argument("--output-dir", type=str, default=str(TRANSCRIPTS_DIR))
     parser.add_argument("--model", type=str, default=None, choices=["tiny", "base", "small", "medium", "large"])
     parser.add_argument("--language", type=str, default="ru")
     parser.add_argument("--device", type=str, default="cpu", choices=["cpu", "cuda"])

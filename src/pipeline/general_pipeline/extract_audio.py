@@ -3,12 +3,16 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import List, Optional
+import shutil
 
-_project_root = Path(__file__).parent.parent.parent
-if str(_project_root) not in sys.path:
-    sys.path.insert(0, str(_project_root))
+REPO_ROOT = Path(__file__).resolve().parents[3]
+SRC_ROOT = REPO_ROOT / "src"
+for path in (REPO_ROOT, SRC_ROOT):
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))
 
 from pipeline.media_utils import MediaSample, discover_media, filter_samples
+from src.utils.paths import AUDIO_WAV_DIR
 
 
 def convert_video_to_wav(
@@ -39,6 +43,10 @@ def convert_video_to_wav(
 
     try:
         subprocess.run(cmd, check=True, capture_output=True, text=True)
+        if not output_path.exists() or output_path.stat().st_size <= 0:
+            print(f"error: ffmpeg completed but wav was not created for {sample.file_id}")
+            return False
+        print(f"wav created: {output_path}")
         return True
     except subprocess.CalledProcessError as exc:
         print(f"error converting {sample.video_source_path.name}: {exc.stderr}")
@@ -53,6 +61,10 @@ def prepare_audio(
     limit: Optional[int] = None,
     force: bool = False,
 ) -> None:
+    if shutil.which("ffmpeg") is None:
+        print("error: ffmpeg is not installed or not available in PATH")
+        return
+
     samples = discover_media(input_dir)
     if not samples:
         print(f"warning: no label folders 0/1 found in {input_dir}")
@@ -85,7 +97,7 @@ def prepare_audio(
 
 def main():
     parser = argparse.ArgumentParser(description="prepare audio: convert video from data/audio_wav/<label>/")
-    parser.add_argument("--input-dir", type=str, default="data/raw/audio_wav")
+    parser.add_argument("--input-dir", type=str, default=str(AUDIO_WAV_DIR))
     parser.add_argument("--sample-rate", type=int, default=16000)
     parser.add_argument("--normalize-db", type=float, default=-20.0)
     parser.add_argument("--file-ids", nargs="+", default=None)
@@ -106,4 +118,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

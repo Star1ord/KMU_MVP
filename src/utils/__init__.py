@@ -1,3 +1,29 @@
+from .paths import (
+    AUDIO_WAV_DIR,
+    FEATURES_DIR,
+    GENERAL_PIPELINE_DIR,
+    ML_DATA_DIR,
+    NLP_MODELS_DIR,
+    OPENSMILE_DIR,
+    PROCESSED_DATA_DIR,
+    REPO_ROOT,
+    SEGMENTS_DIR,
+    TRANSCRIPTS_DIR,
+)
 from .utils import DATA_DIR, MODELS_DIR, RESULTS_DIR
 
-__all__ = ["DATA_DIR", "MODELS_DIR", "RESULTS_DIR"]
+__all__ = [
+    "AUDIO_WAV_DIR",
+    "DATA_DIR",
+    "FEATURES_DIR",
+    "GENERAL_PIPELINE_DIR",
+    "ML_DATA_DIR",
+    "MODELS_DIR",
+    "NLP_MODELS_DIR",
+    "OPENSMILE_DIR",
+    "PROCESSED_DATA_DIR",
+    "REPO_ROOT",
+    "RESULTS_DIR",
+    "SEGMENTS_DIR",
+    "TRANSCRIPTS_DIR",
+]

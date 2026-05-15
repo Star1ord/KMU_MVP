@@ -9,9 +9,11 @@ import pandas as pd
 from pydub import AudioSegment
 from tqdm import tqdm
 
-_project_root = Path(__file__).parent.parent.parent
-if str(_project_root) not in sys.path:
-    sys.path.insert(0, str(_project_root))
+REPO_ROOT = Path(__file__).resolve().parents[3]
+SRC_ROOT = REPO_ROOT / "src"
+for path in (REPO_ROOT, SRC_ROOT):
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))
 
 from pipeline.media_utils import (
     MediaSample,
@@ -19,6 +21,7 @@ from pipeline.media_utils import (
     filter_samples,
     migrate_transcript,
 )
+from src.utils.paths import AUDIO_WAV_DIR, SEGMENTS_DIR, TRANSCRIPTS_DIR
 
 SEGMENTS_METADATA_FILE = "segments_metadata.csv"
 
@@ -179,9 +182,9 @@ def merge_metadata(existing_path: Path, new_df: pd.DataFrame, processed_ids: Lis
 
 def main():
     parser = argparse.ArgumentParser(description="segment audio by transcripts")
-    parser.add_argument("--audio-dir", type=str, default="data/raw/audio_wav")
-    parser.add_argument("--transcript-dir", type=str, default="data/processed/transcripts")
-    parser.add_argument("--output-dir", type=str, default="data/processed/segments")
+    parser.add_argument("--audio-dir", type=str, default=str(AUDIO_WAV_DIR))
+    parser.add_argument("--transcript-dir", type=str, default=str(TRANSCRIPTS_DIR))
+    parser.add_argument("--output-dir", type=str, default=str(SEGMENTS_DIR))
     parser.add_argument("--min-duration", type=float, default=2.0)
     parser.add_argument("--max-duration", type=float, default=5.0)
     parser.add_argument("--file-ids", nargs="+", default=None)
@@ -249,17 +252,16 @@ def main():
             print(f"warning: {sample.file_id}: failed to create segments")
 
     if not all_segments:
-        print("warning: no segments created")
-        return
+        print("error: no segments created; segments_metadata.csv was not written")
+        raise SystemExit(1)
 
     combined_df = pd.concat(all_segments, ignore_index=True)
     segments_root.mkdir(parents=True, exist_ok=True)
     merge_metadata(metadata_path, combined_df, processed_ids)
 
     print(f"done: {len(processed_ids)} files, {len(combined_df)} segments")
-    print(f"metadata updated: {metadata_path}")
+    print(f"segments_metadata.csv created: {metadata_path}")
 
 
 if __name__ == "__main__":
     main()
-

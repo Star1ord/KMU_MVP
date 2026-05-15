@@ -1,10 +1,15 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 import joblib, pickle
 from pathlib import Path
 import numpy as np
 import logging
 import pandas as pd
+from datetime import datetime
+from urllib.parse import unquote
+
+from src.utils.model_loading import ModelLoadError, safe_load_serialized_model
+from src.utils.paths import CV_AUDIO_MODELS_DIR, CV_MODELS_DIR, NLP_MODELS_DIR
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -21,9 +26,9 @@ app.add_middleware(
 
 # Load simple test models (kept only for backwards compatibility with test_models.py)
 MODEL_PATHS = {
-    'nlp': Path('models/nlp/early_fusion_linear_svc.pkl'),
-    'cv': Path('models/cv/model.joblib'),
-    'cv_audio': Path('models/cv_audio/model.joblib'),
+    'nlp': NLP_MODELS_DIR / 'early_fusion_linear_svc.pkl',
+    'cv': CV_MODELS_DIR / 'model.joblib',
+    'cv_audio': CV_AUDIO_MODELS_DIR / 'model.joblib',
 }
 
 models = {}
@@ -45,6 +50,18 @@ for name, path in MODEL_PATHS.items():
         else:
             logger.warning(f"⚠ {name} not found at {path}")
 
+
+safe_models = {}
+for name, path in MODEL_PATHS.items():
+    if not path.exists() or path.stat().st_size <= 0:
+        continue
+    try:
+        safe_models[name] = safe_load_serialized_model(path, model_name=name)
+    except ModelLoadError as exc:
+        logger.error("%s safe-load error: %s", name, exc)
+
+if safe_models:
+    models = safe_models
 
 @app.get("/health")
 def health():
@@ -85,18 +102,76 @@ except Exception as e:
 
 def _validate_video_content_type(file: UploadFile) -> None:
     """Shared validation for video uploads."""
-    allowed = {
+    allowed_content_types = {
         "video/mp4",
+        "application/mp4",
+        "application/x-mp4",
         "video/mpeg",
         "video/quicktime",
         "video/x-matroska",
+        "application/x-matroska",
         "video/webm",
+        "video/x-msvideo",
+        "video/avi",
+        "video/msvideo",
+        "video/3gpp",
+        "video/3gpp2",
+        "video/x-flv",
+        "video/mp2t",
+        "application/octet-stream",
     }
-    if file.content_type not in allowed:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Unsupported file type: {file.content_type}",
+
+    allowed_extensions = {
+        ".mp4",
+        ".mpeg",
+        ".mpg",
+        ".mov",
+        ".mkv",
+        ".webm",
+        ".avi",
+        ".m4v",
+        ".3gp",
+        ".3g2",
+        ".mts",
+        ".m2ts",
+        ".ts",
+        ".flv",
+        ".wmv",
+    }
+
+    content_type = (file.content_type or "").strip().lower()
+    suffix = Path(file.filename or "").suffix.lower()
+
+    # In practice browser / OS MIME detection is unreliable for local videos.
+    # If the filename extension is a known video container, let the pipeline
+    # validate the file contents later with ffmpeg/OpenCV instead of rejecting
+    # the upload up front with a brittle 400.
+    if suffix in allowed_extensions:
+        logger.info(
+            "Accepted upload by extension: filename=%r content_type=%r",
+            file.filename,
+            file.content_type,
         )
+        return
+
+    if content_type in allowed_content_types:
+        return
+
+    if content_type.startswith("video/"):
+        return
+
+    logger.warning(
+        "Rejected upload: filename=%r content_type=%r",
+        file.filename,
+        file.content_type,
+    )
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail=(
+            f"Unsupported file type: content_type={file.content_type!r}, "
+            f"filename={file.filename!r}"
+        ),
+    )
 
 
 async def _analyze_uploaded_video(
@@ -147,7 +222,8 @@ async def _analyze_uploaded_video(
             logger.error(f"analyze_new_media_file returned None for {file.filename}")
             raise ValueError("Processing returned no result")
         
-        logger.info(f"Processing complete for {file.filename}: success={result.get('success')}")
+        result_success = result.get("formatted_result", result).get("success")
+        logger.info(f"Processing complete for {file.filename}: success={result_success}")
         return result
     finally:
         # Best-effort cleanup
@@ -164,7 +240,8 @@ async def _analyze_uploaded_video(
 
 @app.post("/predict")
 async def predict(
-    file: UploadFile = File(...),
+    request: Request,
+    file: UploadFile | None = File(default=None),
     skip_transcription: bool = False,
     label: int | None = None,
     include_cv: bool = True,
@@ -178,9 +255,30 @@ async def predict(
     Upload a video file, run full preprocessing + NLP (and optional CV) models,
     and return the formatted result structure.
     """
-    try:
+    if file is not None:
+        logger.info("/predict received multipart upload: %s", file.filename)
         result = await _analyze_uploaded_video(
             file=file,
+            skip_transcription=skip_transcription,
+            label=label,
+            include_cv=include_cv,
+            include_cv_audio=include_cv_audio,
+            whisper_model="medium",
+            video_sample_every=video_sample_every,
+            cv_audio_sample_rate=cv_audio_sample_rate,
+        )
+        output = result.get("formatted_result", result)
+        logger.info("/predict returned successfully for multipart upload %s", file.filename)
+        return output
+
+    tmp_dir = None
+    tmp_path = None
+    display_name = "upload"
+    try:
+        display_name, _content_type, tmp_dir, tmp_path = await _save_raw_request_body_to_temp_file(request)
+        result = await _analyze_saved_video(
+            tmp_path=tmp_path,
+            display_name=display_name,
             skip_transcription=skip_transcription,
             label=label,
             include_cv=include_cv,
@@ -199,7 +297,7 @@ async def predict(
         
         # Return formatted result if available, otherwise raw
         output = result.get('formatted_result', result)
-        logger.info(f"✓ /predict returned successfully for {file.filename}")
+        logger.info("/predict returned successfully for %s", display_name)
         return output
     except HTTPException:
         raise
@@ -209,6 +307,17 @@ async def predict(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Processing failed: {str(e)}"
         )
+    finally:
+        try:
+            if tmp_path is not None and tmp_path.exists():
+                tmp_path.unlink()
+        except Exception:
+            pass
+        try:
+            if tmp_dir is not None:
+                Path(tmp_dir).rmdir()
+        except Exception:
+            pass
 
 
 @app.post("/test/nlp")
@@ -700,6 +809,103 @@ async def test_emotion_av(
         except Exception:
             pass
         _cleanup_temp_csv(csv_path)
+
+
+def _normalize_upload_name(filename: str | None, default_name: str = "upload.mp4") -> str:
+    candidate = (filename or "").strip()
+    if not candidate:
+        return default_name
+
+    candidate = candidate.replace("\\", "/").split("/")[-1].strip()
+    return candidate or default_name
+
+
+async def _save_raw_request_body_to_temp_file(request: Request) -> tuple[str, str, str, Path]:
+    header_name = request.headers.get("x-file-name")
+    content_type = (
+        request.headers.get("x-file-content-type")
+        or request.headers.get("content-type")
+        or "application/octet-stream"
+    ).split(";", 1)[0].strip().lower()
+    default_suffix = {
+        "video/mp4": ".mp4",
+        "application/mp4": ".mp4",
+        "video/quicktime": ".mov",
+        "video/x-matroska": ".mkv",
+        "video/webm": ".webm",
+        "video/x-msvideo": ".avi",
+    }.get(content_type, ".mp4")
+    default_name = f"upload_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}{default_suffix}"
+    filename = _normalize_upload_name(unquote(header_name) if header_name else None, default_name=default_name)
+
+    file_meta = type(
+        "RequestFileMeta",
+        (),
+        {"filename": filename, "content_type": content_type},
+    )()
+    _validate_video_content_type(file_meta)
+
+    body = await request.body()
+    if not body:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Empty upload body",
+        )
+
+    tmp_dir = tempfile.mkdtemp(prefix="api_raw_upload_")
+    tmp_path = Path(tmp_dir) / filename
+    with open(tmp_path, "wb") as out:
+        out.write(body)
+
+    logger.info(
+        "Saved raw upload: filename=%r content_type=%r bytes=%s",
+        filename,
+        content_type,
+        len(body),
+    )
+    return filename, content_type, tmp_dir, tmp_path
+
+
+async def _analyze_saved_video(
+    tmp_path: Path,
+    display_name: str,
+    *,
+    skip_transcription: bool = False,
+    label: int | None = None,
+    include_cv: bool = True,
+    include_cv_audio: bool = True,
+    whisper_model: str = "medium",
+    video_sample_every: int = 8,
+    cv_audio_sample_rate: float = 0.25,
+) -> dict:
+    if analyze_new_media_file is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Server missing preprocessing functionality",
+        )
+
+    logger.info("Processing saved upload: %s", display_name)
+
+    result = await run_in_threadpool(
+        analyze_new_media_file,
+        str(tmp_path),
+        label,
+        False,
+        whisper_model,
+        skip_transcription,
+        (not include_cv),
+        (not include_cv_audio),
+        int(video_sample_every),
+        float(cv_audio_sample_rate),
+    )
+
+    if result is None:
+        logger.error("analyze_new_media_file returned None for %s", display_name)
+        raise ValueError("Processing returned no result")
+
+    result_success = result.get("formatted_result", result).get("success")
+    logger.info("Processing complete for %s: success=%s", display_name, result_success)
+    return result
 
 
 @app.post("/test/anomaly/text")

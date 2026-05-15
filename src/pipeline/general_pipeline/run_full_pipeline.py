@@ -3,18 +3,21 @@ from __future__ import annotations
 import argparse
 import os
 import csv
+import shutil
 import subprocess
 import sys
 import time
 from pathlib import Path
 from typing import List, Optional
 
-_project_root = Path(__file__).resolve().parent.parent.parent
-_src_dir = _project_root / "src"
-if str(_src_dir) not in sys.path:
-    sys.path.insert(0, str(_src_dir))
+REPO_ROOT = Path(__file__).resolve().parents[3]
+SRC_ROOT = REPO_ROOT / "src"
+for path in (REPO_ROOT, SRC_ROOT):
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))
 
 from pipeline.media_utils import discover_media
+from src.utils.paths import AUDIO_WAV_DIR, OPENSMILE_DIR, PROCESSED_DATA_DIR, resolve_repo_path
 
 
 def run_command(cmd: List[str], description: str) -> bool:
@@ -26,7 +29,7 @@ def run_command(cmd: List[str], description: str) -> bool:
     start_time = time.time()
 
     try:
-        project_root = _project_root
+        project_root = REPO_ROOT
         # Capture output so we can log details on failure
         completed = subprocess.run(cmd, check=True, cwd=str(project_root), capture_output=True, text=True)
         elapsed = time.time() - start_time
@@ -53,18 +56,16 @@ def run_command(cmd: List[str], description: str) -> bool:
 
 
 def check_dependencies() -> bool:
-    required = {
-        "python3": ["python3", "--version"],
-        "ffmpeg": ["ffmpeg", "-version"],
-    }
     all_ok = True
-    for name, cmd in required.items():
-        try:
-            subprocess.run(cmd, check=True, capture_output=True)
-            print(f"ok: {name} found")
-        except Exception:
-            print(f"error: {name} not found")
-            all_ok = False
+
+    print(f"ok: python found at {sys.executable}")
+
+    if shutil.which("ffmpeg"):
+        print("ok: ffmpeg found")
+    else:
+        print("error: ffmpeg not found. Install ffmpeg and make sure it is available in PATH.")
+        all_ok = False
+
     return all_ok
 
 
@@ -124,7 +125,7 @@ def build_file_id_args(file_ids: List[str]) -> List[str]:
 
 def main():
     parser = argparse.ArgumentParser(description="incremental pipeline run")
-    parser.add_argument("--data-dir", type=str, default="data/processed")
+    parser.add_argument("--data-dir", type=str, default=str(PROCESSED_DATA_DIR))
     parser.add_argument("--file-ids", nargs="+", default=None)
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--include-completed", action="store_true")
@@ -143,7 +144,7 @@ def main():
 
     parser.add_argument("--min-segment", type=float, default=2.0)
     parser.add_argument("--max-segment", type=float, default=5.0)
-    parser.add_argument("--opensmile-dir", type=str, default="src/pipeline/opensmile")
+    parser.add_argument("--opensmile-dir", type=str, default=str(OPENSMILE_DIR))
     parser.add_argument("--language", type=str, default="ru")
 
     args = parser.parse_args()
@@ -155,12 +156,13 @@ def main():
             if input().strip().lower() != "y":
                 sys.exit(1)
 
-    base_dir = Path(args.data_dir)
-    audio_dir = Path("data/raw/audio_wav")
+    base_dir = resolve_repo_path(args.data_dir)
+    audio_dir = AUDIO_WAV_DIR
     transcript_dir = base_dir / "transcripts"
     segments_dir = base_dir / "segments"
     features_dir = base_dir / "features"
     merged_path = features_dir / "merged_features.csv"
+    opensmile_dir = resolve_repo_path(args.opensmile_dir)
 
     all_samples = discover_media(audio_dir, transcript_dir)
     all_ids = [s.file_id for s in all_samples]
@@ -189,7 +191,7 @@ def main():
             print(f"   all {len(all_ids)} files already processed")
             print(f"   use --include-completed to reprocess")
         else:
-            print("   add new files to data/raw/audio_wav/0/ or data/raw/audio_wav/1/")
+            print(f"   add new files to {audio_dir / '0'} or {audio_dir / '1'}")
         return
 
     print(f"\nwill process ({len(target_ids)} files): {target_ids}")
@@ -216,7 +218,7 @@ def main():
     
     file_id_args = build_file_id_args(target_ids)
 
-    pipeline_dir = Path("pipeline") / "general_pipeline"
+    pipeline_dir = Path(__file__).resolve().parent
     python_cmd = sys.executable
     success = True
     current_step = 0
@@ -279,7 +281,7 @@ def main():
             "--output-dir",
             str(features_dir),
             "--opensmile-dir",
-            args.opensmile_dir,
+            str(opensmile_dir),
         ] + file_id_args
         success = run_command(cmd, f"[{current_step}/{len(steps)}] extract opensmile features")
 
@@ -317,4 +319,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

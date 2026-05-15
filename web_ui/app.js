@@ -49,15 +49,15 @@ const pipelineNodes = {
 }
 
 const MODE_CONFIGS = [
-  { id: 'all', label: 'All Models (NLP + CV + CV+Audio)', endpoint: '/predict?include_cv=true&include_cv_audio=true&video_sample_every=8&cv_audio_sample_rate=0.25', method: 'POST', needsFile: true },
-  { id: 'nlp', label: 'NLP only', endpoint: '/test/nlp', method: 'POST', needsFile: true },
-  { id: 'cv', label: 'CV only', endpoint: '/test/cv?sample_every=8', method: 'POST', needsFile: true },
-  { id: 'cv_audio', label: 'CV+Audio only', endpoint: '/predict/cv-audio?sample_rate=0.25', method: 'POST', needsFile: true },
-  { id: 'deception', label: 'Deception Detection', endpoint: '/test/deception', method: 'POST', needsFile: true },
-  { id: 'emotion_av', label: 'Emotion Audio+Video', endpoint: '/test/emotion-av?sample_every=8&sample_rate=0.25', method: 'POST', needsFile: true },
-  { id: 'anomaly_audio', label: 'Anomaly Audio', endpoint: '/test/anomaly/audio', method: 'POST', needsFile: true },
-  { id: 'anomaly_video', label: 'Anomaly Video', endpoint: '/test/anomaly/video?sample_every=8', method: 'POST', needsFile: true },
-  { id: 'anomaly_text', label: 'Anomaly Text', endpoint: '/test/anomaly/text', method: 'POST', needsFile: true }
+  { id: 'all', label: 'Combined analysis', description: 'Runs text, video, and CV+audio models together and compares their outputs.', endpoint: '/predict?include_cv=true&include_cv_audio=true&video_sample_every=8&cv_audio_sample_rate=0.25', method: 'POST', needsFile: true, uploadMode: 'raw' },
+  { id: 'nlp', label: 'Text only', description: 'Uses the transcript to estimate risk from language patterns.', endpoint: '/test/nlp', method: 'POST', needsFile: true },
+  { id: 'cv', label: 'Video only', description: 'Checks visual cues from the interview video.', endpoint: '/test/cv?sample_every=8', method: 'POST', needsFile: true },
+  { id: 'cv_audio', label: 'Face + voice model', description: 'Combines facial and voice signals into one session-level score.', endpoint: '/predict/cv-audio?sample_rate=0.25', method: 'POST', needsFile: true },
+  { id: 'deception', label: 'Speech dynamics proxy', description: 'Looks for unusual rises and drops in risk across transcript segments.', endpoint: '/test/deception', method: 'POST', needsFile: true },
+  { id: 'emotion_av', label: 'Emotion summary', description: 'Summarizes visible emotion balance and the CV+audio score.', endpoint: '/test/emotion-av?sample_every=8&sample_rate=0.25', method: 'POST', needsFile: true },
+  { id: 'anomaly_audio', label: 'Audio anomaly', description: 'Flags unusual acoustic rhythm and variability patterns.', endpoint: '/test/anomaly/audio', method: 'POST', needsFile: true },
+  { id: 'anomaly_video', label: 'Video anomaly', description: 'Flags unusual visual changes over the interview.', endpoint: '/test/anomaly/video?sample_every=8', method: 'POST', needsFile: true },
+  { id: 'anomaly_text', label: 'Text anomaly', description: 'Flags unusual wording density, repetition, and punctuation.', endpoint: '/test/anomaly/text', method: 'POST', needsFile: true }
 ]
 
 const charts = { gauge: null, score: null, status: null, distribution: null, control: null, videoTimeline: null, acousticRadar: null, acousticTimeline: null }
@@ -241,7 +241,13 @@ function buildModeOptions() {
   modeOptionsEl.innerHTML = ''
   MODE_CONFIGS.forEach((cfg, index) => {
     const label = document.createElement('label')
-    label.innerHTML = `<input type="radio" name="mode" value="${cfg.id}" ${index === 0 ? 'checked' : ''}> ${cfg.label}`
+    label.innerHTML = `
+      <input type="radio" name="mode" value="${cfg.id}" ${index === 0 ? 'checked' : ''}>
+      <span class="mode-copy">
+        <strong>${cfg.label}</strong>
+        <small>${cfg.description || ''}</small>
+      </span>
+    `
     modeOptionsEl.appendChild(label)
   })
 }
@@ -323,6 +329,52 @@ function pickRecordScore(records, preferredNames = []) {
     if(record) return clamp01(Number(record.score))
   }
   return null
+}
+
+function extractVideoTimelineData(data) {
+  const points = Array.isArray(data?.video_timeline)
+    ? data.video_timeline
+        .map(point => ({ x: Number(point?.x), y: Number(point?.y) }))
+        .filter(point => !Number.isNaN(point.x) && !Number.isNaN(point.y))
+    : []
+  return { points, supported: points.length > 0 }
+}
+
+function extractVideoMarkers(data) {
+  return Array.isArray(data?.video_markers) ? data.video_markers : []
+}
+
+function extractAcousticInterpretation(data) {
+  const profile = data?.acoustic_profile && Array.isArray(data.acoustic_profile.labels) && Array.isArray(data.acoustic_profile.values)
+    ? data.acoustic_profile
+    : null
+  const timeline = Array.isArray(data?.acoustic_timeline)
+    ? data.acoustic_timeline
+        .map(point => ({ x: Number(point?.x), y: Number(point?.y) }))
+        .filter(point => !Number.isNaN(point.x) && !Number.isNaN(point.y))
+    : []
+  const insights = Array.isArray(data?.acoustic_insights) ? data.acoustic_insights.filter(Boolean) : []
+  return { profile, timeline, insights, supported: Boolean(profile || timeline.length || insights.length) }
+}
+
+function computeContributionShares(data, records) {
+  const sourceEntries = data?.overall?.ensemble?.individual_scores
+    ? Object.entries(data.overall.ensemble.individual_scores)
+    : records
+        .filter(record => record.name !== 'ensemble' && record.score !== null && record.score !== undefined && !Number.isNaN(Number(record.score)))
+        .map(record => [record.name, Number(record.score)])
+
+  const normalized = sourceEntries
+    .map(([name, score]) => ({ name, score: clamp01(Number(score)) }))
+    .filter(item => !Number.isNaN(item.score))
+
+  if(normalized.length === 0) return []
+  const total = normalized.reduce((sum, item) => sum + Math.max(0, item.score), 0)
+  if(total <= 0) {
+    const equalShare = 100 / normalized.length
+    return normalized.map(item => ({ ...item, percent: equalShare }))
+  }
+  return normalized.map(item => ({ ...item, percent: (Math.max(0, item.score) / total) * 100 }))
 }
 
 function getPreviewDurationSeconds() {
@@ -474,64 +526,42 @@ function renderDistributionChart(data, records) {
   destroyChart('distribution')
   const ctx = getChartContext(distributionCanvas, 'distributionChart')
   if(!ctx) return
-
-  if(data?.emotion_distribution && Object.keys(data.emotion_distribution).length > 0) {
-    const entries = Object.entries(data.emotion_distribution)
-    charts.distribution = new Chart(ctx, {
-      type: 'pie',
-      data: { labels: entries.map(([k]) => k), datasets: [{ data: entries.map(([, v]) => Number(v)), backgroundColor: ['#4aa8ff', '#22c55e', '#f59e0b', '#ef4444', '#57d0c9', '#8ab4ff'] }] },
-      options: { maintainAspectRatio: false, plugins: { legend: { position: 'bottom', labels: { color: '#bfd2f2' } } } }
-    })
-    return
-  }
-
-  if(data?.indicators && Object.keys(data.indicators).length > 0) {
-    const entries = Object.entries(data.indicators)
-    charts.distribution = new Chart(ctx, {
-      type: 'bar',
-      data: { labels: entries.map(([k]) => k), datasets: [{ data: entries.map(([, v]) => Number(v)), backgroundColor: '#57d0c9' }] },
-      options: baseChartOptions({ plugins: { legend: { display: false } } })
-    })
-    return
-  }
-
-  if(data?.components && Object.keys(data.components).length > 0) {
-    const entries = Object.entries(data.components)
-    charts.distribution = new Chart(ctx, {
-      type: 'radar',
-      data: { labels: entries.map(([k]) => k), datasets: [{ label: 'Components', data: entries.map(([, v]) => Number(v)), borderColor: '#4aa8ff', backgroundColor: 'rgba(74, 168, 255, 0.22)' }] },
-      options: { maintainAspectRatio: false, scales: { r: { beginAtZero: true, max: 1, grid: { color: 'rgba(122, 165, 231, 0.2)' }, angleLines: { color: 'rgba(122, 165, 231, 0.2)' }, pointLabels: { color: '#bfd2f2' }, ticks: { color: '#9eb7dc', backdropColor: 'transparent' } } }, plugins: { legend: { labels: { color: '#bfd2f2' } } } }
-    })
-    return
-  }
-
-  if(data?.overall?.ensemble?.individual_scores) {
-    const entries = Object.entries(data.overall.ensemble.individual_scores)
-    charts.distribution = new Chart(ctx, {
-      type: 'polarArea',
-      data: { labels: entries.map(([k]) => modelTitle(k)), datasets: [{ data: entries.map(([, v]) => Number(v)), backgroundColor: ['#4aa8ff', '#22c55e', '#f59e0b', '#ef4444', '#57d0c9'] }] },
-      options: {
-        maintainAspectRatio: false,
-        scales: {
-          r: {
-            ticks: { display: false },
-            grid: { display: false },
-            angleLines: { display: false },
-            pointLabels: { display: false }
+  const contributions = computeContributionShares(data, records)
+  if(contributions.length === 0) return
+  charts.distribution = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: contributions.map(item => modelTitle(item.name)),
+      datasets: [{
+        label: 'Contribution share (%)',
+        data: contributions.map(item => Number(item.percent.toFixed(2))),
+        backgroundColor: ['#4aa8ff', '#57d0c9', '#22c55e', '#f59e0b', '#ef4444', '#8ab4ff']
+      }]
+    },
+    options: baseChartOptions({
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label(context) {
+              return `${context.dataset.label}: ${formatNumber(context.parsed.y)}%`
+            }
           }
-        },
-        plugins: { legend: { position: 'bottom', labels: { color: '#bfd2f2' } } }
+        }
+      },
+      scales: {
+        x: { ticks: { color: '#9eb7dc' }, grid: { color: 'rgba(122, 165, 231, 0.12)' } },
+        y: {
+          beginAtZero: true,
+          max: 100,
+          ticks: {
+            color: '#9eb7dc',
+            callback(value) { return `${value}%` }
+          },
+          grid: { color: 'rgba(122, 165, 231, 0.12)' }
+        }
       }
     })
-    return
-  }
-
-  const items = records.filter(r => r.score !== null && r.score !== undefined && !Number.isNaN(Number(r.score)))
-  if(items.length === 0) return
-  charts.distribution = new Chart(ctx, {
-    type: 'doughnut',
-    data: { labels: items.map(r => modelTitle(r.name)), datasets: [{ data: items.map(r => Number(r.score)), backgroundColor: ['#4aa8ff', '#57d0c9', '#22c55e', '#f59e0b', '#ef4444'] }] },
-    options: { maintainAspectRatio: false, plugins: { legend: { position: 'bottom', labels: { color: '#bfd2f2' } } } }
   })
 }
 
@@ -539,7 +569,11 @@ function renderVideoTimelineChart(timelineState) {
   destroyChart('videoTimeline')
   const timeline = timelineState?.points || []
   if(!timeline || timeline.length === 0) {
-    if(videoTimelineHintEl) videoTimelineHintEl.textContent = 'No CV timeline available for this mode.'
+    if(videoTimelineHintEl) {
+      videoTimelineHintEl.textContent = timelineState?.supported
+        ? 'No usable frame-level markers were produced for this video.'
+        : 'This mode returned only a session-level CV score. Frame-by-frame explanation is not available yet.'
+    }
     return
   }
 
@@ -550,9 +584,7 @@ function renderVideoTimelineChart(timelineState) {
   }
   const compact = downsampleTimeline(sorted, 150)
   if(videoTimelineHintEl) {
-    videoTimelineHintEl.textContent = timelineState?.synthetic
-      ? 'Showing a model-level fallback line because frame-by-frame CV markers are unavailable.'
-      : `Showing ${compact.length} timeline points.`
+    videoTimelineHintEl.textContent = `Showing ${compact.length} frame-level visual marker points.`
   }
   const ctx = getChartContext(videoTimelineCanvas, 'videoTimelineChart')
   if(!ctx) return
@@ -591,28 +623,32 @@ function renderVideoTimelineChart(timelineState) {
   })
 }
 
-function renderVideoMarkers(data, timeline, records) {
-  const segments = Array.isArray(data?.segments) ? data.segments : []
+function renderVideoMarkers(data, markers, timeline, records) {
   const items = []
 
-  if(segments.length) {
-    const topSegments = [...segments].filter(s => s && s.risk_score !== undefined).sort((a, b) => Number(b.risk_score || 0) - Number(a.risk_score || 0)).slice(0, 3)
-    topSegments.forEach(seg => {
-      const hints = Array.isArray(seg.top_features) ? seg.top_features.slice(0, 2).map(f => f.feature || f.type).filter(Boolean) : []
-      items.push({ title: `${formatTime(seg.start_time ?? seg.start)} - ${formatTime(seg.end_time ?? seg.end)}`, score: Number(seg.risk_score), note: hints.length ? `Top signals: ${hints.join(', ')}` : (seg.text ? String(seg.text).slice(0, 90) : 'No marker detail') })
+  if(Array.isArray(markers) && markers.length) {
+    markers.slice(0, 4).forEach(marker => {
+      const signals = Array.isArray(marker?.top_signals)
+        ? marker.top_signals.map(signal => `${signal.feature} (${formatNumber(signal.value)})`)
+        : []
+      items.push({
+        title: `Frame at ${formatTime(marker.timestamp)}`,
+        score: Number(marker.score),
+        note: signals.length ? `Top signals: ${signals.join(', ')}` : 'No detailed frame-level drivers were returned.'
+      })
     })
   }
 
   if(items.length === 0 && timeline.length) {
     const maxPoint = [...timeline].sort((a, b) => b.y - a.y)[0]
-    items.push({ title: `Peak at ${formatTime(maxPoint.x)}`, score: maxPoint.y, note: 'Highest risk point on timeline.' })
+    items.push({ title: `Peak at ${formatTime(maxPoint.x)}`, score: maxPoint.y, note: 'Highest visual marker point in the timeline.' })
   }
 
   if(items.length === 0) {
     const cv = records.find(r => r.name === 'cv')
     const cvAudio = records.find(r => r.name === 'cv_audio')
-    if(cv?.score !== undefined) items.push({ title: 'CV marker score', score: Number(cv.score), note: `Prediction: ${cv.prediction_label ?? cv.prediction ?? '-'}` })
-    if(cvAudio?.score !== undefined) items.push({ title: 'CV+Audio marker score', score: Number(cvAudio.score), note: `Prediction: ${cvAudio.prediction_label ?? cvAudio.prediction ?? '-'}` })
+    if(cv?.score !== undefined) items.push({ title: 'CV session score', score: Number(cv.score), note: 'This model returned only an overall video score for the full interview.' })
+    if(cvAudio?.score !== undefined) items.push({ title: 'CV+Audio session score', score: Number(cvAudio.score), note: 'This model returned only a session-level multimodal score.' })
   }
 
   if(items.length === 0) {
@@ -632,32 +668,16 @@ function setVideoFrameStripMessage(text) {
 }
 
 function extractFrameCaptureTimes(data, timeline) {
-  const duration = getPreviewDurationSeconds()
   const candidates = []
-  const segments = Array.isArray(data?.segments) ? data.segments : []
-
-  segments
-    .filter(seg => seg && (seg.start_time !== undefined || seg.start !== undefined))
-    .sort((a, b) => Number(b.risk_score || 0) - Number(a.risk_score || 0))
-    .slice(0, 4)
-    .forEach(seg => {
-      const start = Number(seg.start_time ?? seg.start ?? 0)
-      const end = Number(seg.end_time ?? seg.end ?? start)
-      candidates.push((start + Math.max(start, end)) / 2)
-    })
 
   ;[...timeline]
     .sort((a, b) => Number(b.y || 0) - Number(a.y || 0))
     .slice(0, 4)
     .forEach(point => candidates.push(Number(point.x)))
 
-  if(candidates.length === 0) {
-    ;[0.16, 0.38, 0.62, 0.84].forEach(ratio => candidates.push(duration * ratio))
-  }
-
   const seen = new Set()
   return candidates
-    .map(time => Math.max(0, Math.min(duration, Number(time) || 0)))
+    .map(time => Math.max(0, Math.min(getPreviewDurationSeconds(), Number(time) || 0)))
     .filter(time => {
       const key = time.toFixed(2)
       if(seen.has(key)) return false
@@ -733,6 +753,10 @@ async function renderVideoFrames(data, timeline) {
     }
 
     const frameTimes = extractFrameCaptureTimes(data, timeline)
+    if(frameTimes.length === 0) {
+      setVideoFrameStripMessage('No frame-level video markers are available for this mode yet.')
+      return
+    }
     const canvas = document.createElement('canvas')
     canvas.width = 320
     canvas.height = 180
@@ -776,51 +800,27 @@ async function renderVideoFrames(data, timeline) {
 }
 
 function buildAcousticProfile(data, timeline, records) {
-  const metrics = data?.metrics && typeof data.metrics === 'object' ? data.metrics : {}
-  const segments = Array.isArray(data?.segments) ? data.segments : []
-  const scores = timeline.map(t => Number(t.y)).filter(v => !Number.isNaN(v))
-  const durations = segments.map(s => Number(s.duration)).filter(v => !Number.isNaN(v) && v > 0)
-
-  const scoreStd = metrics.score_std !== undefined ? clamp01(Number(metrics.score_std) * 2.4) : clamp01(std(scores) * 2.4)
-  const durationCvRaw = metrics.duration_cv !== undefined ? Number(metrics.duration_cv) : (durations.length > 1 ? (std(durations) / Math.max(1e-6, avg(durations))) : 0)
-  const durationCv = clamp01(durationCvRaw)
-
-  const jumpRatio = metrics.jump_ratio !== undefined
-    ? clamp01(Number(metrics.jump_ratio))
-    : (() => {
-        if(scores.length <= 1) return 0
-        let jumps = 0
-        for(let i = 1; i < scores.length; i += 1) if(Math.abs(scores[i] - scores[i - 1]) > 0.35) jumps += 1
-        return clamp01(jumps / (scores.length - 1))
-      })()
-
-  const cvAudioScore = records.find(r => r.name === 'cv_audio' && r.score !== null && r.score !== undefined)
-  const baseline = pickOverallRisk(data, records) ?? 0.5
-
-  const profile = {
-    labels: ['Pitch Variability', 'Speech Rhythm', 'Pause Pattern', 'Energy Stability', 'Prosody Shift', 'Arousal'],
-    values: [
-      scoreStd,
-      clamp01(1 - durationCv * 0.75),
-      durationCv,
-      clamp01(1 - scoreStd * 0.8),
-      jumpRatio,
-      clamp01(cvAudioScore ? Number(cvAudioScore.score) : baseline)
-    ]
+  if(data?.acoustic_profile && Array.isArray(data.acoustic_profile.labels) && Array.isArray(data.acoustic_profile.values)) {
+    return {
+      profile: data.acoustic_profile,
+      insights: Array.isArray(data?.acoustic_insights) ? data.acoustic_insights : []
+    }
   }
-
-  const insights = []
-  if(profile.values[0] > 0.55) insights.push('Speech variability elevated')
-  if(profile.values[2] > 0.5) insights.push('Pause duration instability detected')
-  if(profile.values[4] > 0.5) insights.push('Prosodic jumps across segments')
-  if(profile.values[5] > 0.65) insights.push('High multimodal arousal')
-  if(insights.length === 0) insights.push('Audio-acoustic pattern is relatively stable')
-
-  return { profile, insights }
+  const cvAudioScore = records.find(r => r.name === 'cv_audio' && r.score !== null && r.score !== undefined)
+  if(!cvAudioScore) return { profile: null, insights: ['Detailed acoustic features are not available for this mode yet.'] }
+  return {
+    profile: null,
+    insights: ['The current CV+audio model returned only an overall session score, not a detailed acoustic feature breakdown.']
+  }
 }
 
 function renderAcousticRadar(profileData) {
   destroyChart('acousticRadar')
+  if(!profileData) {
+    const ctx = getChartContext(acousticRadarCanvas, 'acousticRadarChart')
+    if(ctx) ctx.clearRect(0, 0, acousticRadarCanvas.width, acousticRadarCanvas.height)
+    return
+  }
   const ctx = getChartContext(acousticRadarCanvas, 'acousticRadarChart')
   if(!ctx) return
   charts.acousticRadar = new Chart(ctx, {
@@ -832,7 +832,8 @@ function renderAcousticRadar(profileData) {
 
 function renderAcousticInsights(insights) {
   acousticInsightsEl.innerHTML = ''
-  insights.forEach(text => {
+  const items = Array.isArray(insights) && insights.length ? insights : ['No acoustic insights are available for this mode.']
+  items.forEach(text => {
     const chip = document.createElement('span')
     chip.className = 'insight-chip'
     chip.textContent = text
@@ -844,7 +845,9 @@ function renderAcousticTimeline(timelineState) {
   destroyChart('acousticTimeline')
   const timeline = timelineState?.points || []
   if(!timeline || timeline.length === 0) {
-    acousticTimelineHintEl.textContent = 'No timeline points for this mode.'
+    acousticTimelineHintEl.textContent = timelineState?.supported
+      ? 'No usable acoustic segment timeline was produced for this file.'
+      : 'This mode did not return a segment-by-segment acoustic timeline.'
     return
   }
 
@@ -858,11 +861,9 @@ function renderAcousticTimeline(timelineState) {
   }
 
   const compact = downsampleTimeline(sorted, 140)
-  acousticTimelineHintEl.textContent = timelineState?.synthetic
-    ? 'Showing a model-level fallback line because segment-level acoustic dynamics are unavailable.'
-    : compact.length < sorted.length
-      ? `Showing ${compact.length} of ${sorted.length} points for readability.`
-      : `Showing ${compact.length} points.`
+  acousticTimelineHintEl.textContent = compact.length < sorted.length
+    ? `Showing ${compact.length} of ${sorted.length} acoustic segment points for readability.`
+    : `Showing ${compact.length} acoustic segment points.`
   const ctx = getChartContext(acousticTimelineCanvas, 'acousticTimelineChart')
   if(!ctx) return
 
@@ -981,7 +982,7 @@ function buildTextPayload(data, rawPayload, overallScore) {
   })
 
   const ranked = Array.from(termMap.values()).sort((a, b) => (b.maxRisk * 2 + b.count * 0.08) - (a.maxRisk * 2 + a.count * 0.08)).slice(0, 10).map(item => ({ ...item, weight: clamp01(item.maxRisk * 0.7 + Math.min(1, item.count / 6) * 0.3) }))
-  return { text, terms: ranked }
+  return { text, terms: ranked, segments }
 }
 
 function renderTranscript(payload) {
@@ -994,15 +995,41 @@ function renderTranscript(payload) {
     return
   }
 
-  const clippedText = payload.text.length > 6000 ? `${payload.text.slice(0, 6000)} ...` : payload.text
-  let html = escapeHtml(clippedText)
-  if(payload.terms.length) {
-    const pattern = new RegExp(`\\b(${payload.terms.map(t => escapeRegex(t.term)).join('|')})\\b`, 'gi')
-    html = html.replace(pattern, match => `<span class="term-hit" data-term="${match.toLowerCase()}">${match}</span>`)
+  const highlightText = value => {
+    let html = escapeHtml(value)
+    if(payload.terms.length) {
+      const pattern = new RegExp(`\\b(${payload.terms.map(t => escapeRegex(t.term)).join('|')})\\b`, 'gi')
+      html = html.replace(pattern, match => `<span class="term-hit" data-term="${match.toLowerCase()}">${match}</span>`)
+    }
+    return html
   }
 
+  if(Array.isArray(payload.segments) && payload.segments.length) {
+    const html = payload.segments
+      .slice(0, 40)
+      .map(seg => {
+        const level = (seg?.risk_level || riskLevelFromScore(seg?.risk_score || 0)).toString().toLowerCase()
+        const scoreLabel = seg?.risk_score !== undefined && seg?.risk_score !== null ? formatNumber(seg.risk_score) : '-'
+        return `
+          <div class="transcript-segment ${escapeHtml(level)}">
+            <div class="transcript-segment-meta">
+              <span>${escapeHtml(formatTime(seg?.start_time ?? seg?.start ?? 0))} - ${escapeHtml(formatTime(seg?.end_time ?? seg?.end ?? 0))}</span>
+              <span>${escapeHtml(level)}</span>
+              <span>score ${escapeHtml(scoreLabel)}</span>
+            </div>
+            <div class="transcript-segment-text">${highlightText(String(seg?.text || ''))}</div>
+          </div>
+        `
+      })
+      .join('')
+    transcriptTextEl.className = 'transcript-box transcript-box-segmented'
+    transcriptTextEl.innerHTML = html
+    return
+  }
+
+  const clippedText = payload.text.length > 6000 ? `${payload.text.slice(0, 6000)} ...` : payload.text
   transcriptTextEl.className = 'transcript-box'
-  transcriptTextEl.innerHTML = html
+  transcriptTextEl.innerHTML = highlightText(clippedText)
 }
 
 function setActiveTranscriptTerm(termLower) {
@@ -1011,10 +1038,10 @@ function setActiveTranscriptTerm(termLower) {
 
 function renderTextMarkerInfo(termData, overallScore) {
   if(!termData) {
-    textMarkerInfoEl.innerHTML = `<div><b>Word:</b> -</div><div><b>Risk score:</b> ${escapeHtml(formatNumber(overallScore))}</div><div><b>Contribution weight:</b> -</div><div class="empty-note" style="margin-top:6px;">Click highlighted text markers to inspect influence.</div>`
+    textMarkerInfoEl.innerHTML = `<div><b>Highlighted term:</b> -</div><div><b>Current score:</b> ${escapeHtml(formatNumber(overallScore))}</div><div><b>Estimated influence:</b> -</div><div class="empty-note" style="margin-top:6px;">Click a highlighted word inside a high-risk transcript segment to inspect it.</div>`
     return
   }
-  textMarkerInfoEl.innerHTML = `<div><b>Word:</b> ${escapeHtml(termData.term)}</div><div><b>Risk score:</b> ${escapeHtml(formatNumber(termData.maxRisk))}</div><div><b>Contribution weight:</b> ${escapeHtml(formatNumber(termData.weight))}</div><div><b>Count:</b> ${escapeHtml(termData.count)}</div>`
+  textMarkerInfoEl.innerHTML = `<div><b>Highlighted term:</b> ${escapeHtml(termData.term)}</div><div><b>Highest segment score:</b> ${escapeHtml(formatNumber(termData.maxRisk))}</div><div><b>Estimated influence:</b> ${escapeHtml(formatNumber(termData.weight * 100))}%</div><div><b>Occurrences:</b> ${escapeHtml(termData.count)}</div>`
 }
 
 function prettyFeatureName(name) {
@@ -1041,10 +1068,19 @@ function extractInfluenceRows(data) {
 function renderInfluenceTable(data) {
   const rows = extractInfluenceRows(data)
   if(rows.length === 0) {
-    influenceTableWrapEl.innerHTML = '<div class="empty-note">No feature contribution data available.</div>'
+    const contributions = computeContributionShares(data, extractModelRecords(data, { id: 'all' }))
+    if(contributions.length === 0) {
+      influenceTableWrapEl.innerHTML = '<div class="empty-note">Detailed feature-level influence is not available for the current production models.</div>'
+      return
+    }
+    let html = '<table class="model-table"><thead><tr><th>Model</th><th>Share</th><th>Score</th></tr></thead><tbody>'
+    contributions.forEach(item => {
+      html += `<tr><td>${escapeHtml(modelTitle(item.name))}</td><td>${escapeHtml(formatNumber(item.percent))}%</td><td>${escapeHtml(formatNumber(item.score))}</td></tr>`
+    })
+    influenceTableWrapEl.innerHTML = `${html}</tbody></table>`
     return
   }
-  let html = '<table class="model-table"><thead><tr><th>Feature</th><th>Type</th><th>Weight</th><th>Mean Value</th></tr></thead><tbody>'
+  let html = '<table class="model-table"><thead><tr><th>Feature</th><th>Type</th><th>Weight</th><th>Mean value</th></tr></thead><tbody>'
   rows.forEach(row => {
     html += `<tr><td>${escapeHtml(prettyFeatureName(row.feature))}</td><td>${escapeHtml(row.type)}</td><td>${escapeHtml(formatNumber(row.contribution))}</td><td>${escapeHtml(formatNumber(row.valueMean))}</td></tr>`
   })
@@ -1068,11 +1104,11 @@ function renderControlChart(records, data) {
 }
 function renderAll(data, modeCfg, rawPayload) {
   const records = extractModelRecords(data, modeCfg)
-  const timeline = extractTimeline(data)
   const score = pickOverallRisk(data, records)
   const level = pickOverallLevel(data, score)
-  const videoTimeline = resolveTimeline(timeline, pickRecordScore(records, ['cv', 'video', 'ensemble']) ?? score)
-  const acousticTimeline = resolveTimeline(timeline, pickRecordScore(records, ['cv_audio', 'nlp', 'ensemble']) ?? score)
+  const videoTimeline = extractVideoTimelineData(data)
+  const videoMarkers = extractVideoMarkers(data)
+  const acousticInterpretation = extractAcousticInterpretation(data)
 
   renderGauge(score)
   setRiskBadge(level)
@@ -1081,13 +1117,16 @@ function renderAll(data, modeCfg, rawPayload) {
   renderStatusChart(records)
   renderDistributionChart(data, records)
   renderVideoTimelineChart(videoTimeline)
-  renderVideoMarkers(data, videoTimeline.points, records)
+  renderVideoMarkers(data, videoMarkers, videoTimeline.points, records)
   void renderVideoFrames(data, videoTimeline.points)
 
-  const acoustic = buildAcousticProfile(data, acousticTimeline.points, records)
+  const acoustic = buildAcousticProfile(data, acousticInterpretation.timeline, records)
   renderAcousticRadar(acoustic.profile)
   renderAcousticInsights(acoustic.insights)
-  renderAcousticTimeline(acousticTimeline)
+  renderAcousticTimeline({
+    points: acousticInterpretation.timeline,
+    supported: acousticInterpretation.supported
+  })
 
   const textPayload = buildTextPayload(data, rawPayload, score)
   renderTranscript(textPayload)
@@ -1112,16 +1151,16 @@ function clearUI() {
   setRiskBadge('unknown')
 
   transcriptTextEl.className = 'transcript-box empty-note'
-  transcriptTextEl.textContent = 'Run analysis to populate transcript markers.'
+  transcriptTextEl.textContent = 'Run analysis to show transcript segments and highlighted terms.'
   textMarkerInfoEl.innerHTML = '<div class="empty-note">No marker selected.</div>'
-  influenceTableWrapEl.innerHTML = '<div class="empty-note">No feature contribution data available.</div>'
+  influenceTableWrapEl.innerHTML = '<div class="empty-note">Run analysis to show contribution details.</div>'
 
   videoMarkerListEl.className = 'marker-list empty-note'
-  videoMarkerListEl.textContent = 'Run analysis to see marker signals.'
-  setVideoFrameStripMessage('Run analysis to generate key frame previews.')
-  if(videoTimelineHintEl) videoTimelineHintEl.textContent = 'Awaiting CV markers.'
-  acousticInsightsEl.innerHTML = '<span class="insight-chip">Awaiting audio-acoustic features</span>'
-  acousticTimelineHintEl.textContent = 'Run analysis to populate the acoustic timeline.'
+  videoMarkerListEl.textContent = 'Run analysis to see the strongest visual markers.'
+  setVideoFrameStripMessage('Run analysis to generate frame previews from the strongest visual markers.')
+  if(videoTimelineHintEl) videoTimelineHintEl.textContent = 'Awaiting frame-level visual markers.'
+  acousticInsightsEl.innerHTML = '<span class="insight-chip">Awaiting acoustic features</span>'
+  acousticTimelineHintEl.textContent = 'Run analysis to populate the segment-by-segment acoustic timeline.'
 
   clearCharts()
   resetPipelineState()
@@ -1130,29 +1169,49 @@ function clearUI() {
 
 async function sendRequest(modeCfg) {
   let body = null
+  let headers = undefined
   if(modeCfg.needsFile) {
     if(!videoInput.files || videoInput.files.length === 0) {
       setStatus('Select a video file for the selected mode.', 'error')
       return
     }
-    body = new FormData()
-    body.append('file', videoInput.files[0])
+    const file = videoInput.files[0]
+    if(modeCfg.uploadMode === 'raw') {
+      body = file
+      headers = {
+        'Content-Type': file.type || 'application/octet-stream',
+        'X-File-Name': encodeURIComponent(file.name || 'upload.mp4'),
+        'X-File-Content-Type': file.type || 'application/octet-stream'
+      }
+    } else {
+      body = new FormData()
+      body.append('file', file)
+    }
   }
 
   const url = apiBase + modeCfg.endpoint
   startPipelineAnimation()
-  setStatus(`Request: ${modeCfg.method} ${modeCfg.endpoint}`)
+  setStatus(`Uploading the video and starting "${modeCfg.label}"...`)
 
   const startedAt = performance.now()
   try {
-    const res = await fetch(url, { method: modeCfg.method, body })
+    const res = await fetch(url, { method: modeCfg.method, body, headers })
     const text = await res.text()
     const elapsedMs = Math.round(performance.now() - startedAt)
     const sizeBytes = new TextEncoder().encode(text).length
 
     if(!res.ok) {
+      let errorMessage = res.statusText
+      try {
+        const parsed = JSON.parse(text)
+        if(typeof parsed?.detail === 'string' && parsed.detail.trim()) {
+          errorMessage = parsed.detail.trim()
+        } else if(typeof parsed?.error === 'string' && parsed.error.trim()) {
+          errorMessage = parsed.error.trim()
+        }
+      } catch {}
       finishPipeline(false)
-      setStatus(`Error ${res.status}: ${res.statusText}`, 'error')
+      setStatus(`Analysis failed (${res.status}): ${errorMessage}`, 'error')
       summaryCardEl.innerHTML = `<h3>Summary</h3><div class="empty-note">${escapeHtml(text)}</div>`
       rawJsonEl.textContent = text
       clearCharts()
@@ -1175,10 +1234,10 @@ async function sendRequest(modeCfg) {
       return
     }
     finishPipeline(true)
-    setStatus(`Done: ${modeCfg.label} (${elapsedMs} ms)`, 'ok')
+    setStatus(`${modeCfg.label} completed in ${elapsedMs} ms.`, 'ok')
   } catch (err) {
     finishPipeline(false)
-    setStatus(`Fetch error: ${err.message}`, 'error')
+    setStatus(`Could not send the request: ${err.message}`, 'error')
     summaryCardEl.innerHTML = `<h3>Summary</h3><div class="empty-note">${escapeHtml(err.message)}</div>`
     rawJsonEl.textContent = JSON.stringify({ error: err.message }, null, 2)
     clearCharts()
@@ -1206,8 +1265,8 @@ videoInput.addEventListener('change', () => {
   if(!file) {
     selectedFileNameEl.textContent = 'No file selected'
     durationHintEl.textContent = 'Awaiting upload'
-    setVideoFrameStripMessage('Upload a video to preview key frames.')
-    if(videoTimelineHintEl) videoTimelineHintEl.textContent = 'Awaiting CV markers.'
+    setVideoFrameStripMessage('Upload a video to preview the strongest visual frames after analysis.')
+    if(videoTimelineHintEl) videoTimelineHintEl.textContent = 'Awaiting frame-level visual markers.'
     previewVideo.removeAttribute('src')
     previewVideo.load()
     return
@@ -1215,7 +1274,7 @@ videoInput.addEventListener('change', () => {
 
   selectedFileNameEl.textContent = file.name
   durationHintEl.textContent = `${Math.round(file.size / 1024 / 1024 * 10) / 10} MB`
-  setVideoFrameStripMessage('Run analysis to generate key frame previews.')
+  setVideoFrameStripMessage('Run analysis to generate frame previews from the strongest visual markers.')
 
   if(previewUrl) URL.revokeObjectURL(previewUrl)
   previewUrl = URL.createObjectURL(file)
