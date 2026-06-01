@@ -41,6 +41,9 @@ py -3 -m uvicorn api.main:app --reload --host 0.0.0.0 --port 8000
 Swagger:
 `http://127.0.0.1:8000/docs`
 
+OpenAPI request documentation:
+`docs/openapi.md`
+
 UI:
 `http://127.0.0.1:5500`
 

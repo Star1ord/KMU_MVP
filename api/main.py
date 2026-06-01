@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 import joblib, pickle
 from pathlib import Path
@@ -14,7 +14,35 @@ from src.utils.paths import CV_AUDIO_MODELS_DIR, CV_MODELS_DIR, NLP_MODELS_DIR
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI()
+app = FastAPI(
+    title="KMU MVP API",
+    description=(
+        "Multimodal video risk analysis API. Upload endpoints accept video files "
+        "and return model-specific scores, labels, and diagnostic metadata."
+    ),
+    version="0.2.0",
+    docs_url="/docs",
+    redoc_url="/redoc",
+    openapi_url="/openapi.json",
+    openapi_tags=[
+        {
+            "name": "service",
+            "description": "Service health and runtime availability checks.",
+        },
+        {
+            "name": "prediction",
+            "description": "Main production-style multimodal prediction endpoints.",
+        },
+        {
+            "name": "test",
+            "description": "Focused model and proxy-model endpoints used by the MVP UI.",
+        },
+        {
+            "name": "anomaly",
+            "description": "Text, audio, and video anomaly proxy endpoints.",
+        },
+    ],
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -63,7 +91,12 @@ for name, path in MODEL_PATHS.items():
 if safe_models:
     models = safe_models
 
-@app.get("/health")
+@app.get(
+    "/health",
+    tags=["service"],
+    summary="Check loaded models",
+    description="Returns the names and count of models loaded by the API process.",
+)
 def health():
     """Return basic information about loaded test models."""
     return {"loaded": list(models.keys()), "total": len(models)}
@@ -238,16 +271,25 @@ async def _analyze_uploaded_video(
             pass
 
 
-@app.post("/predict")
+@app.post(
+    "/predict",
+    tags=["prediction"],
+    summary="Run full video analysis",
+    description=(
+        "Accepts a video either as multipart form-data field `file` or as a raw "
+        "binary request body. Runs preprocessing plus NLP and, by default, CV and "
+        "CV+Audio. Use query parameters to disable slower modalities or tune sampling."
+    ),
+)
 async def predict(
     request: Request,
-    file: UploadFile | None = File(default=None),
-    skip_transcription: bool = False,
-    label: int | None = None,
-    include_cv: bool = True,
-    include_cv_audio: bool = True,
-    video_sample_every: int = 8,
-    cv_audio_sample_rate: float = 0.25,
+    file: UploadFile | None = File(default=None, description="Video file for multipart uploads."),
+    skip_transcription: bool = Query(False, description="Reuse existing text artifacts when available instead of running ASR."),
+    label: int | None = Query(None, description="Optional reference label: 0=control, 1=experimental/risk."),
+    include_cv: bool = Query(True, description="Run the computer-vision modality when the CV pipeline is available."),
+    include_cv_audio: bool = Query(True, description="Run the combined face/audio modality when available."),
+    video_sample_every: int = Query(8, ge=1, description="Process every Nth video frame for CV feature extraction."),
+    cv_audio_sample_rate: float = Query(0.25, gt=0, description="Frame sampling rate used by the CV+Audio pipeline."),
 ):
     """
     End-to-end production endpoint.
@@ -320,11 +362,16 @@ async def predict(
             pass
 
 
-@app.post("/test/nlp")
+@app.post(
+    "/test/nlp",
+    tags=["test"],
+    summary="Run NLP-only analysis",
+    description="Accepts a video, transcribes speech, and returns the compact NLP risk result.",
+)
 async def test_nlp(
-    file: UploadFile = File(...),
-    skip_transcription: bool = False,
-    label: int | None = None,
+    file: UploadFile = File(..., description="Video file containing speech to transcribe and analyze."),
+    skip_transcription: bool = Query(False, description="Reuse existing text artifacts when available instead of running ASR."),
+    label: int | None = Query(None, description="Optional reference label: 0=control, 1=experimental/risk."),
 ):
     """
     NLP-focused endpoint.
@@ -398,10 +445,15 @@ async def test_nlp(
         )
 
 
-@app.post("/test/cv")
+@app.post(
+    "/test/cv",
+    tags=["test"],
+    summary="Run CV-only analysis",
+    description="Accepts a video, extracts visual features, and returns the video-model probability and class.",
+)
 async def test_cv(
-    file: UploadFile = File(...),
-    sample_every: int = 8,
+    file: UploadFile = File(..., description="Video file for visual feature extraction."),
+    sample_every: int = Query(8, ge=1, description="Process every Nth video frame."),
 ):
     """
     CV-only endpoint: принимает видео, извлекает CV-фичи и прогоняет через видео-модель.
@@ -474,12 +526,20 @@ async def test_cv(
             pass
 
 
-@app.post("/predict/cv-audio")
+@app.post(
+    "/predict/cv-audio",
+    tags=["prediction"],
+    summary="Run CV+Audio analysis",
+    description=(
+        "Accepts a video, extracts face/audio features, and returns probability, "
+        "prediction label, and risk level from the CV+Audio pipeline."
+    ),
+)
 async def predict_cv_audio_endpoint(
-    file: UploadFile = File(...),
-    threshold: float = 0.5,
-    sample_rate: float = 0.25,
-    use_vgg: bool = False,
+    file: UploadFile = File(..., description="Video file with visible face and audio track."),
+    threshold: float = Query(0.5, ge=0, le=1, description="Decision threshold for class 1."),
+    sample_rate: float = Query(0.25, gt=0, description="Frame sampling rate for CV+Audio feature extraction."),
+    use_vgg: bool = Query(False, description="Enable VGG16 visual features when the runtime supports them."),
 ):
     """
     CV+Audio endpoint: принимает видео, извлекает лица (RetinaFace), 
@@ -599,11 +659,19 @@ def _cleanup_temp_csv(csv_path: str | None) -> None:
         pass
 
 
-@app.post("/test/deception")
+@app.post(
+    "/test/deception",
+    tags=["test"],
+    summary="Run deception proxy analysis",
+    description=(
+        "Accepts a video and derives a deception-style score from NLP segment risk "
+        "dynamics. This is a proxy implementation for MVP testing."
+    ),
+)
 async def test_deception(
-    file: UploadFile = File(...),
-    skip_transcription: bool = False,
-    label: int | None = None,
+    file: UploadFile = File(..., description="Video file containing speech segments."),
+    skip_transcription: bool = Query(False, description="Reuse existing text artifacts when available instead of running ASR."),
+    label: int | None = Query(None, description="Optional reference label: 0=control, 1=experimental/risk."),
 ):
     """
     Deception-style proxy model based on segment-level risk dynamics.
@@ -696,11 +764,19 @@ async def test_deception(
         )
 
 
-@app.post("/test/emotion-av")
+@app.post(
+    "/test/emotion-av",
+    tags=["test"],
+    summary="Run audio/video emotion proxy analysis",
+    description=(
+        "Accepts a video, estimates visual emotion distribution, optionally uses "
+        "CV+Audio probability, and returns an emotion risk score."
+    ),
+)
 async def test_emotion_av(
-    file: UploadFile = File(...),
-    sample_every: int = 8,
-    sample_rate: float = 0.25,
+    file: UploadFile = File(..., description="Video file with face frames and optional audio track."),
+    sample_every: int = Query(8, ge=1, description="Process every Nth video frame for emotion features."),
+    sample_rate: float = Query(0.25, gt=0, description="Frame sampling rate used for optional CV+Audio scoring."),
 ):
     """
     Emotion audio+video proxy:
@@ -908,11 +984,16 @@ async def _analyze_saved_video(
     return result
 
 
-@app.post("/test/anomaly/text")
+@app.post(
+    "/test/anomaly/text",
+    tags=["anomaly"],
+    summary="Run text anomaly proxy analysis",
+    description="Accepts a video, transcribes speech, and scores lexical anomaly signals.",
+)
 async def test_anomaly_text(
-    file: UploadFile = File(...),
-    skip_transcription: bool = False,
-    label: int | None = None,
+    file: UploadFile = File(..., description="Video file containing speech to transcribe."),
+    skip_transcription: bool = Query(False, description="Reuse existing text artifacts when available instead of running ASR."),
+    label: int | None = Query(None, description="Optional reference label: 0=control, 1=experimental/risk."),
 ):
     try:
         result = await _analyze_uploaded_video(
@@ -969,11 +1050,16 @@ async def test_anomaly_text(
         )
 
 
-@app.post("/test/anomaly/audio")
+@app.post(
+    "/test/anomaly/audio",
+    tags=["anomaly"],
+    summary="Run audio anomaly proxy analysis",
+    description="Accepts a video and scores anomaly signals from segment-level audio/NLP dynamics.",
+)
 async def test_anomaly_audio(
-    file: UploadFile = File(...),
-    skip_transcription: bool = False,
-    label: int | None = None,
+    file: UploadFile = File(..., description="Video file containing audio segments."),
+    skip_transcription: bool = Query(False, description="Reuse existing text artifacts when available instead of running ASR."),
+    label: int | None = Query(None, description="Optional reference label: 0=control, 1=experimental/risk."),
 ):
     try:
         result = await _analyze_uploaded_video(
@@ -1050,10 +1136,15 @@ async def test_anomaly_audio(
         )
 
 
-@app.post("/test/anomaly/video")
+@app.post(
+    "/test/anomaly/video",
+    tags=["anomaly"],
+    summary="Run video anomaly proxy analysis",
+    description="Accepts a video, extracts visual indicators, and returns a video anomaly score.",
+)
 async def test_anomaly_video(
-    file: UploadFile = File(...),
-    sample_every: int = 8,
+    file: UploadFile = File(..., description="Video file for visual anomaly feature extraction."),
+    sample_every: int = Query(8, ge=1, description="Process every Nth video frame."),
 ):
     if process_video_for_prediction is None:
         raise HTTPException(
