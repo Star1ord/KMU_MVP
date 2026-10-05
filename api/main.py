@@ -620,7 +620,7 @@ def _clamp01(value: float) -> float:
 def _risk_level_from_score(score: float | None) -> str | None:
     if score is None:
         return None
-    if score >= 0.7:
+    if score >= 0.5:
         return "high"
     if score >= 0.4:
         return "medium"

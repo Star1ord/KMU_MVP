@@ -317,7 +317,7 @@ function downsampleTimeline(points, maxPoints = 180) {
 function riskLevelFromScore(score) {
   const s = Number(score)
   if(Number.isNaN(s)) return 'unknown'
-  if(s >= 0.7) return 'high'
+  if(s >= 0.5) return 'high'
   if(s >= 0.4) return 'medium'
   return 'low'
 }

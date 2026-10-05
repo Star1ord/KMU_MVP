@@ -574,7 +574,7 @@ def predict_with_video_model(
         probability, prediction = predictor.predict_from_csv(video_df)
         
         # Определяем уровень риска
-        if probability >= 0.7:
+        if probability >= 0.5:
             risk_level = 'high'
         elif probability >= 0.4:
             risk_level = 'medium'
@@ -633,7 +633,7 @@ def create_ensemble_prediction(
     agreement = (audio_pred == video_pred)
     
     # Определяем уровень риска для ансамбля
-    if ensemble_score >= 0.7:
+    if ensemble_score >= 0.5:
         risk_level = 'high'
     elif ensemble_score >= 0.4:
         risk_level = 'medium'

@@ -657,7 +657,7 @@ def predict_cv_audio(
         result["probability"] = float(prob)
         result["prediction"] = int(pred)
         result["prediction_label"] = "experimental" if pred == 1 else "control"
-        result["risk_level"] = "high" if prob >= 0.7 else "medium" if prob >= 0.4 else "low"
+        result["risk_level"] = "high" if prob >= 0.5 else "medium" if prob >= 0.4 else "low"
         return result
 
     except Exception as e:

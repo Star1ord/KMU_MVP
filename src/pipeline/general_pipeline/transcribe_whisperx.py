@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import json
 import os
 import platform
@@ -93,6 +94,81 @@ def _describe_whisperx_import_error(exc: Exception | None) -> str:
         return "WhisperX import failed for an unknown reason."
 
     return f"WhisperX import failed: {type(exc).__name__}: {exc}"
+
+
+VAD_MODEL_SHA256 = "0b5b3216d60a2d32fc086b47ea8c67589aaeb26b7e07fcbe620d6d0b83e209ea"
+VAD_MIRROR_REPO = "Synthetai/whisperx-vad-segmentation"
+VAD_MIRROR_FILE = "pytorch_model.bin"
+
+
+def _resolve_vad_model_fp() -> str | None:
+    """Локальный путь к весам VAD.
+
+    whisperx 3.1.1 качает их с S3-бакета, который больше не отдаёт файл (403),
+    поэтому берём тот же checkpoint с зеркала и сверяем sha256 с ожидаемым.
+    """
+    try:
+        from huggingface_hub import hf_hub_download
+    except Exception as exc:
+        print(f"warning: huggingface_hub unavailable, VAD fallback skipped: {exc}", flush=True)
+        return None
+
+    try:
+        path = hf_hub_download(VAD_MIRROR_REPO, VAD_MIRROR_FILE)
+    except Exception as exc:
+        print(f"warning: could not fetch VAD weights from mirror: {exc}", flush=True)
+        return None
+
+    digest = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    if digest != VAD_MODEL_SHA256:
+        print(f"warning: VAD weights checksum mismatch ({digest}), falling back to whisperx default", flush=True)
+        return None
+
+    return path
+
+
+def _patch_wav2vec2_processor_sampling_rate() -> None:
+    """Добавляет Wav2Vec2Processor.sampling_rate.
+
+    whisperx 3.1.1 читает его при выравнивании, но в актуальных transformers
+    значение доступно только через feature_extractor.
+    """
+    try:
+        from transformers import Wav2Vec2Processor
+    except Exception as exc:
+        print(f"warning: could not patch Wav2Vec2Processor: {exc}", flush=True)
+        return
+
+    if hasattr(Wav2Vec2Processor, "sampling_rate"):
+        return
+
+    Wav2Vec2Processor.sampling_rate = property(
+        lambda self: self.feature_extractor.sampling_rate
+    )
+
+
+def _faster_whisper_compat_options() -> dict:
+    """Поля TranscriptionOptions, которых whisperx не передаёт.
+
+    faster-whisper >= 1.0 добавил обязательные поля (multilingual, hotwords и др.),
+    из-за чего whisperx.load_model падает с TypeError. Подставляем их значения
+    по умолчанию, но только те, которые реально есть в установленной версии.
+    """
+    try:
+        import dataclasses
+        from faster_whisper.transcribe import TranscriptionOptions
+    except Exception:
+        return {}
+
+    defaults = {
+        "multilingual": False,
+        "max_new_tokens": None,
+        "clip_timestamps": "0",
+        "hallucination_silence_threshold": None,
+        "hotwords": None,
+    }
+    available = {f.name for f in dataclasses.fields(TranscriptionOptions)}
+    return {key: value for key, value in defaults.items() if key in available}
 
 
 def detect_environment() -> dict:
@@ -270,6 +346,8 @@ def batch_transcribe(
                 model_name,
                 device=device,
                 compute_type=compute_type,
+                asr_options=_faster_whisper_compat_options(),
+                vad_model_fp=_resolve_vad_model_fp(),
             )
             print("model loaded\n", flush=True)
             break
@@ -291,6 +369,7 @@ def batch_transcribe(
         raise RuntimeError("Failed to load whisper model after multiple attempts")
 
     print(f"loading alignment model for language '{language}'...", flush=True)
+    _patch_wav2vec2_processor_sampling_rate()
     try:
         align_model, align_metadata = whisperx.load_align_model(
             language_code=language,

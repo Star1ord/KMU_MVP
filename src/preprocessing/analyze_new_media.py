@@ -33,7 +33,7 @@ def _wrap_result(result: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _risk_level(score: float) -> str:
-    if score >= 0.7:
+    if score >= 0.5:
         return "high"
     if score >= 0.4:
         return "medium"
@@ -275,7 +275,7 @@ def _build_video_interpretation(video_result: Dict[str, Any] | None) -> tuple[li
     for index, score in frame_scores.items():
         timeline.append(
             {
-                "x": float(timestamp_values.iloc[index]),
+                "x": float(timestamp_values.loc[index]),
                 "y": _clamp01(score),
             }
         )
@@ -288,7 +288,7 @@ def _build_video_interpretation(video_result: Dict[str, Any] | None) -> tuple[li
             series = normalized_columns.get(column_name)
             if series is None:
                 continue
-            driver_pairs.append((label, _clamp01(series.iloc[row_index])))
+            driver_pairs.append((label, _clamp01(series.loc[row_index])))
         driver_pairs.sort(key=lambda item: item[1], reverse=True)
         top_signals = [
             {"feature": label, "value": float(score)}
@@ -297,9 +297,9 @@ def _build_video_interpretation(video_result: Dict[str, Any] | None) -> tuple[li
         ]
         markers.append(
             {
-                "timestamp": float(timestamp_values.iloc[row_index]),
-                "frame_idx": int(frame_df.iloc[row_index].get("frame_idx", row_index)),
-                "score": _clamp01(frame_scores.iloc[row_index]),
+                "timestamp": float(timestamp_values.loc[row_index]),
+                "frame_idx": int(frame_df.loc[row_index].get("frame_idx", row_index)),
+                "score": _clamp01(frame_scores.loc[row_index]),
                 "top_signals": top_signals,
             }
         )
@@ -336,7 +336,7 @@ def _build_acoustic_interpretation(session_data: pd.DataFrame | None) -> tuple[D
         start_time = _coerce_time_value(row.get("start", row.get("start_time")), 0.0)
         end_time = _coerce_time_value(row.get("end", row.get("end_time")), start_time)
         midpoint = start_time + max(0.0, end_time - start_time) / 2.0
-        timeline.append({"x": midpoint, "y": _clamp01(segment_scores.iloc[index])})
+        timeline.append({"x": midpoint, "y": _clamp01(segment_scores.loc[index])})
 
     profile = {
         "labels": [
@@ -506,7 +506,7 @@ def _run_nlp_prediction(
     result["success"] = True
     result["nlp_prediction"] = final_prediction
     result["nlp_risk_score"] = p_final
-    result["nlp_risk_level"] = "high" if p_final >= 0.6 else "medium" if p_final >= 0.3 else "low"
+    result["nlp_risk_level"] = "high" if p_final >= 0.5 else "medium" if p_final >= 0.4 else "low"
     result["nlp_prediction_label"] = "experimental" if final_prediction == 1 else "control"
     result["prediction"] = final_prediction
     result["risk_score"] = p_final
@@ -567,7 +567,7 @@ def _run_text_only_nlp_prediction(
     result["success"] = True
     result["nlp_prediction"] = prediction
     result["nlp_risk_score"] = p_text
-    result["nlp_risk_level"] = "high" if p_text >= 0.6 else "medium" if p_text >= 0.3 else "low"
+    result["nlp_risk_level"] = "high" if p_text >= 0.5 else "medium" if p_text >= 0.4 else "low"
     result["nlp_prediction_label"] = "experimental" if prediction == 1 else "control"
     result["prediction"] = prediction
     result["risk_score"] = p_text

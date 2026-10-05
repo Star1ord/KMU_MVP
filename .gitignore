@@ -49,3 +49,7 @@ Thumbs.db
 # Local reports and temporary repo snapshots
 /structure.txt
 /results/
+
+# Local test media (large) and OMC session state
+/test_data/
+/.omc/
