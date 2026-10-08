@@ -31,6 +31,9 @@ torchaudio==2.8.0
 whisperx==3.1.1
 setuptools>=65.0.0,<81
 
-# Optional heavy CV+Audio stack:
-# retinaface==0.0.6
-# tensorflow-cpu==2.10.0
+# CV+Audio visual stack: Keras VGG16 fc1+fc2 features for DNN_model.onnx.
+# 2.19 is required (not 2.10): it ships ml-dtypes>=0.5, matching jax/mediapipe in
+# this image; older TF pins ml-dtypes 0.2 and breaks mediapipe (the CV modality).
+# Face detection uses the OpenCV Haar fallback already in predict.py; RetinaFace is
+# intentionally omitted (its tf-keras dependency conflicts with Keras 3 / TF 2.19).
+tensorflow-cpu==2.19.0

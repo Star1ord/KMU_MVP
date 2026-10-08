@@ -23,6 +23,10 @@ COPY requirements.runtime.txt ./requirements.runtime.txt
 RUN pip install --upgrade pip setuptools wheel \
     && pip install -r requirements.runtime.txt
 
+# Pre-download Keras VGG16 imagenet weights so the CV+Audio modality works offline
+# and the first request is not delayed by a ~550MB download.
+RUN python -c "from tensorflow.keras.applications import VGG16; VGG16(weights='imagenet', include_top=True)"
+
 COPY api ./api
 COPY config ./config
 COPY inference ./inference

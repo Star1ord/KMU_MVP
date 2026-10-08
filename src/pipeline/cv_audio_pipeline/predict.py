@@ -2,9 +2,11 @@
 CV+Audio inference (video -> MFCC + VGG16 -> ONNX DNN).
 
 Based on the training notebook `cv_audio_test/audio_cv_1to1.py`:
-- audio features: MFCC (typically 13 dims)
+- audio features: MFCC (13 dims)
 - video features: VGG16 fc1+fc2 (8192 dims) averaged over frames
-- input order during training: [audio, video]
+- input order during training: [audio, video] -> 8205 dims
+- both halves are StandardScaler-normalised before the net (scaler_audio: 13,
+  scaler_video: 8192); the ONNX outputs raw logits, class 1 = experimental.
 """
 
 from __future__ import annotations
@@ -27,6 +29,10 @@ _VGG_MODELS: Dict[str, Any] = {}
 _HAAR_CASCADE = None
 _RETINAFACE_AVAILABLE: Optional[bool] = None
 _RETINAFACE_CLASS = None
+
+_SCALER_AUDIO = None
+_SCALER_VIDEO = None
+_SCALERS_LOADED = False
 
 
 def _safe_metric_value(value: Any) -> Optional[float]:
@@ -138,6 +144,53 @@ def _get_onnx_session(model_path: str):
     _ONNX_SESSION = sess
     _ONNX_SESSION_PATH = model_path
     return sess
+
+
+def _load_scalers() -> Tuple[Any, Any]:
+    """Load the StandardScalers used at training time (audio: 13 dims, video: 8192 dims).
+
+    These are mandatory: the ONNX was trained on features normalised by these exact
+    scalers. Feeding raw (unscaled) features collapses the output to ~0 regardless of
+    the actual content. Returns (scaler_audio, scaler_video) or (None, None) if missing.
+    """
+    global _SCALER_AUDIO, _SCALER_VIDEO, _SCALERS_LOADED
+    if _SCALERS_LOADED:
+        return _SCALER_AUDIO, _SCALER_VIDEO
+
+    _SCALERS_LOADED = True
+    try:
+        import joblib
+    except Exception:
+        return None, None
+
+    audio_candidates = [
+        Path("models/cv_audio/scaler_audio.pkl"),
+        Path("cv_audio_test/scaler_audio.pkl"),
+    ]
+    video_candidates = [
+        Path("models/cv_audio/scaler_video.pkl"),
+        Path("cv_audio_test/scaler_video.pkl"),
+    ]
+
+    def _first_existing(paths):
+        for p in paths:
+            if p.exists():
+                return p
+        return None
+
+    audio_path = _first_existing(audio_candidates)
+    video_path = _first_existing(video_candidates)
+    if audio_path is None or video_path is None:
+        return None, None
+
+    try:
+        _SCALER_AUDIO = joblib.load(audio_path)
+        _SCALER_VIDEO = joblib.load(video_path)
+    except Exception:
+        _SCALER_AUDIO = None
+        _SCALER_VIDEO = None
+
+    return _SCALER_AUDIO, _SCALER_VIDEO
 
 
 def _ensure_haar():
@@ -472,13 +525,56 @@ def _extract_video_vgg_features(
     video_path: str,
     sample_rate_fps: float = 1.0,
     max_frames: int = 48,
-    use_vgg: bool = False,
-) -> np.ndarray:
+    use_vgg: bool = True,
+    allow_fallback: bool = False,
+) -> Tuple[np.ndarray, bool]:
     """
     Extract mean VGG16 (fc1+fc2) feature vector from sampled face crops in the video.
-    Returns shape: (8192,).
+    Returns (features(8192,), used_vgg).
+
+    used_vgg=True  -> genuine Keras VGG16 fc1+fc2 features (match the trained scaler/ONNX).
+    used_vgg=False -> TF-free grayscale+Sobel descriptor. This does NOT match the training
+    distribution and must NOT be fed to the ONNX as if it were VGG. It is produced only when
+    allow_fallback=True (explicit opt-in); otherwise this function raises.
     """
     import cv2
+
+    _VGG_UNAVAILABLE = (
+        "VGG16 visual features unavailable: TensorFlow/Keras is not installed in this "
+        "runtime. The CV+Audio ONNX was trained on Keras VGG16 fc1+fc2 features, so the "
+        "grayscale+Sobel fallback is not interchangeable. Install tensorflow-cpu (and let "
+        "VGG16 imagenet weights download) to enable this modality, or pass allow_fallback=True "
+        "to accept an unreliable descriptor."
+    )
+
+    if not use_vgg:
+        if allow_fallback:
+            return (
+                _extract_video_features_fallback(
+                    video_path=video_path,
+                    sample_rate_fps=sample_rate_fps,
+                    max_frames=max_frames,
+                ),
+                False,
+            )
+        raise RuntimeError(_VGG_UNAVAILABLE)
+
+    # Try VGG16; only fall back if explicitly allowed.
+    try:
+        _ensure_protobuf_runtime_compat()
+        from tensorflow.keras.applications.vgg16 import preprocess_input
+        fc1, fc2 = _get_vgg16_fc_models()
+    except Exception as exc:
+        if allow_fallback:
+            return (
+                _extract_video_features_fallback(
+                    video_path=video_path,
+                    sample_rate_fps=sample_rate_fps,
+                    max_frames=max_frames,
+                ),
+                False,
+            )
+        raise RuntimeError(_VGG_UNAVAILABLE) from exc
 
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
@@ -491,27 +587,6 @@ def _extract_video_vgg_features(
     feats = []
     frame_idx = 0
     processed = 0
-
-    if not use_vgg:
-        cap.release()
-        return _extract_video_features_fallback(
-            video_path=video_path,
-            sample_rate_fps=sample_rate_fps,
-            max_frames=max_frames,
-        )
-
-    # Try VGG16 first; fall back to a TF-free descriptor if unavailable.
-    try:
-        _ensure_protobuf_runtime_compat()
-        from tensorflow.keras.applications.vgg16 import preprocess_input
-        fc1, fc2 = _get_vgg16_fc_models()
-    except Exception:
-        cap.release()
-        return _extract_video_features_fallback(
-            video_path=video_path,
-            sample_rate_fps=sample_rate_fps,
-            max_frames=max_frames,
-        )
 
     try:
         while processed < max_frames:
@@ -541,7 +616,7 @@ def _extract_video_vgg_features(
     if not feats:
         raise ValueError("no face features extracted (no faces detected or all crops invalid)")
 
-    return np.mean(np.stack(feats, axis=0), axis=0).astype(np.float32)
+    return np.mean(np.stack(feats, axis=0), axis=0).astype(np.float32), True
 
 
 def _sigmoid(x: np.ndarray) -> np.ndarray:
@@ -605,7 +680,9 @@ def predict_cv_audio(
     threshold: float = 0.5,
     sample_rate: float = 0.25,
     n_mfcc: int = 13,
-    use_vgg: bool = False,
+    use_vgg: bool = True,
+    allow_fallback: bool = False,
+    apply_scalers: bool = True,
 ) -> Dict[str, Any]:
     """
     End-to-end CV+Audio prediction for a single video file.
@@ -628,11 +705,30 @@ def predict_cv_audio(
         sess = _get_onnx_session(onnx_path)
 
         audio_feat = _extract_audio_mfcc(video_path, n_mfcc=n_mfcc)  # (n_mfcc,)
-        video_feat = _extract_video_vgg_features(
+        video_feat, used_vgg = _extract_video_vgg_features(
             video_path,
             sample_rate_fps=sample_rate,
             use_vgg=bool(use_vgg),
+            allow_fallback=bool(allow_fallback),
         )  # (8192,)
+
+        # Apply the training-time StandardScalers. Mandatory for a meaningful probability:
+        # the ONNX was fit on scaled features. Scaling is applied only to genuine VGG16
+        # features; a fallback descriptor is left unscaled and flagged as unreliable.
+        if apply_scalers and used_vgg:
+            scaler_audio, scaler_video = _load_scalers()
+            if scaler_audio is None or scaler_video is None:
+                raise RuntimeError(
+                    "CV+Audio scalers not found. Expected models/cv_audio/scaler_audio.pkl "
+                    "(13 dims) and models/cv_audio/scaler_video.pkl (8192 dims). Without them "
+                    "the ONNX receives unscaled features and collapses to ~0."
+                )
+            audio_feat = scaler_audio.transform(
+                np.asarray(audio_feat, dtype=np.float32).reshape(1, -1)
+            )[0].astype(np.float32)
+            video_feat = scaler_video.transform(
+                np.asarray(video_feat, dtype=np.float32).reshape(1, -1)
+            )[0].astype(np.float32)
 
         x_vec = np.concatenate([audio_feat, video_feat], axis=0).astype(np.float32)
 
@@ -658,6 +754,12 @@ def predict_cv_audio(
         result["prediction"] = int(pred)
         result["prediction_label"] = "experimental" if pred == 1 else "control"
         result["risk_level"] = "high" if prob >= 0.5 else "medium" if prob >= 0.4 else "low"
+        result["feature_source"] = "vgg16" if used_vgg else "fallback_sobel"
+        if not used_vgg:
+            result["error"] = (
+                "unreliable: non-VGG fallback features, scalers not applied; "
+                "probability is not comparable to the trained model"
+            )
         return result
 
     except Exception as e:
