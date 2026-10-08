@@ -539,7 +539,7 @@ async def predict_cv_audio_endpoint(
     file: UploadFile = File(..., description="Video file with visible face and audio track."),
     threshold: float = Query(0.5, ge=0, le=1, description="Decision threshold for class 1."),
     sample_rate: float = Query(0.25, gt=0, description="Frame sampling rate for CV+Audio feature extraction."),
-    use_vgg: bool = Query(False, description="Enable VGG16 visual features when the runtime supports them."),
+    use_vgg: bool = Query(True, description="Enable VGG16 visual features (required for a calibrated score; returns an explicit error if the runtime lacks TensorFlow)."),
 ):
     """
     CV+Audio endpoint: принимает видео, извлекает лица (RetinaFace), 

@@ -34,6 +34,20 @@ _SCALER_AUDIO = None
 _SCALER_VIDEO = None
 _SCALERS_LOADED = False
 
+# StandardScaler divides by per-dim std; a few VGG fc dims are near-constant in the
+# training set (min std ~3e-5), so a tiny live deviation explodes to |z|~1e4 and
+# saturates the net. Training-scaled features sit within ~[-5,5], so clipping at this
+# bound is a no-op in-distribution but tames pathological out-of-distribution dims.
+_SCALED_CLIP = 10.0
+
+_VGG_UNAVAILABLE_MSG = (
+    "VGG16 visual features unavailable: TensorFlow/Keras is not installed in this "
+    "runtime. The CV+Audio ONNX was trained on Keras VGG16 fc1+fc2 features, so the "
+    "grayscale+Sobel fallback is not interchangeable. Install tensorflow-cpu (and let "
+    "VGG16 imagenet weights download) to enable this modality, or pass allow_fallback=True "
+    "to accept an unreliable descriptor."
+)
+
 
 def _safe_metric_value(value: Any) -> Optional[float]:
     try:
@@ -398,6 +412,71 @@ def _get_vgg16_fc_models():
     return fc1, fc2
 
 
+def _get_vgg16_feat_model():
+    """VGG16 model emitting [fc1, fc2] in one forward pass (one conv pass, not two).
+
+    Numerically identical to concatenating the separate fc1/fc2 models used at
+    training time, but ~2x cheaper per frame. Cached globally.
+    """
+    if "feat" in _VGG_MODELS:
+        return _VGG_MODELS["feat"]
+
+    _ensure_protobuf_runtime_compat()
+    from tensorflow.keras.applications import VGG16
+    from tensorflow.keras.models import Model
+
+    base = VGG16(weights="imagenet", include_top=True)
+    feat = Model(
+        inputs=base.input,
+        outputs=[base.get_layer("fc1").output, base.get_layer("fc2").output],
+    )
+    _VGG_MODELS["feat"] = feat
+    return feat
+
+
+def _load_audio_waveform(video_path: str, sr: int = 16000) -> Tuple[np.ndarray, int]:
+    """Decode the full audio track to a mono float32 waveform at `sr`."""
+    import soundfile as sf
+
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+        wav_path = tmp.name
+    try:
+        cmd = [
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            "-i", str(video_path), "-vn", "-ac", "1", "-ar", str(sr), wav_path,
+        ]
+        subprocess.run(cmd, check=True)
+        waveform, loaded_sr = sf.read(wav_path, always_2d=False)
+        if getattr(waveform, "ndim", 1) > 1:
+            waveform = waveform.mean(axis=1)
+        return np.asarray(waveform, dtype=np.float32), int(loaded_sr)
+    finally:
+        try:
+            os.unlink(wav_path)
+        except Exception:
+            pass
+
+
+def _mfcc_mean(waveform: np.ndarray, sr: int, n_mfcc: int = 13) -> Optional[np.ndarray]:
+    """Mean MFCC vector over a waveform slice. Returns (n_mfcc,) or None if empty."""
+    import torch
+    import torchaudio
+
+    waveform = np.asarray(waveform, dtype=np.float32)
+    if waveform.size == 0:
+        return None
+    tensor = torch.from_numpy(waveform).unsqueeze(0)
+    transform = torchaudio.transforms.MFCC(
+        sample_rate=int(sr),
+        n_mfcc=n_mfcc,
+        melkwargs={"n_fft": 400, "hop_length": 160, "n_mels": 40, "center": False},
+    )
+    mfcc = transform(tensor)
+    if mfcc.numel() == 0:
+        return None
+    return mfcc.mean(dim=-1).squeeze(0).detach().cpu().numpy().astype(np.float32)
+
+
 def _ensure_protobuf_runtime_compat() -> None:
     """
     Best-effort compatibility shim for environments where protobuf is older
@@ -539,14 +618,6 @@ def _extract_video_vgg_features(
     """
     import cv2
 
-    _VGG_UNAVAILABLE = (
-        "VGG16 visual features unavailable: TensorFlow/Keras is not installed in this "
-        "runtime. The CV+Audio ONNX was trained on Keras VGG16 fc1+fc2 features, so the "
-        "grayscale+Sobel fallback is not interchangeable. Install tensorflow-cpu (and let "
-        "VGG16 imagenet weights download) to enable this modality, or pass allow_fallback=True "
-        "to accept an unreliable descriptor."
-    )
-
     if not use_vgg:
         if allow_fallback:
             return (
@@ -557,7 +628,7 @@ def _extract_video_vgg_features(
                 ),
                 False,
             )
-        raise RuntimeError(_VGG_UNAVAILABLE)
+        raise RuntimeError(_VGG_UNAVAILABLE_MSG)
 
     # Try VGG16; only fall back if explicitly allowed.
     try:
@@ -574,7 +645,7 @@ def _extract_video_vgg_features(
                 ),
                 False,
             )
-        raise RuntimeError(_VGG_UNAVAILABLE) from exc
+        raise RuntimeError(_VGG_UNAVAILABLE_MSG) from exc
 
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
@@ -674,21 +745,74 @@ def _onnx_predict_proba(session, x_vec: np.ndarray) -> float:
     raise ValueError(f"Unsupported ONNX output shape: {out.shape}")
 
 
+def _collect_chunk_face_crops(
+    video_path: str,
+    chunk_sec: float,
+    keep_chunks: set,
+    frames_per_chunk: int,
+    faces_fps: float,
+) -> Dict[int, list]:
+    """Single video pass: per kept chunk, up to `frames_per_chunk` RGB 224x224 face crops.
+
+    Mirrors training: faces are sampled ~1 fps (FaceDetection used interval=fps/1) and
+    grouped by the 15s chunk they fall into. Returns {chunk_idx: [rgb(224,224,3), ...]}.
+    """
+    import cv2
+
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise RuntimeError(f"could not open video: {video_path}")
+
+    rotation = _read_video_rotation(video_path)
+    fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+    interval = max(1, int(math.floor(fps / max(faces_fps, 1e-6))))
+
+    crops: Dict[int, list] = {}
+    frame_idx = 0
+    try:
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            if frame_idx % interval == 0:
+                chunk = int((frame_idx / fps) // chunk_sec) if fps else 0
+                if chunk in keep_chunks and len(crops.get(chunk, [])) < frames_per_chunk:
+                    rotated = _apply_rotation(frame, rotation)
+                    crop = _extract_visual_crop(rotated)
+                    if crop is not None:
+                        rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+                        rgb = cv2.resize(rgb, (224, 224), interpolation=cv2.INTER_LINEAR)
+                        crops.setdefault(chunk, []).append(rgb.astype(np.float32))
+            frame_idx += 1
+    finally:
+        cap.release()
+    return crops
+
+
 def predict_cv_audio(
     video_path: str,
     model_path: Optional[str] = None,
     threshold: float = 0.5,
-    sample_rate: float = 0.25,
+    sample_rate: float = 0.25,  # kept for API compatibility; chunking uses faces_fps
     n_mfcc: int = 13,
     use_vgg: bool = True,
     allow_fallback: bool = False,
     apply_scalers: bool = True,
+    chunk_sec: float = 15.0,
+    frames_per_chunk: int = 6,
+    max_chunks: int = 24,
+    faces_fps: float = 1.0,
 ) -> Dict[str, Any]:
     """
-    End-to-end CV+Audio prediction for a single video file.
+    End-to-end CV+Audio prediction for a single video, matching the training pipeline:
+    the clip is split into `chunk_sec` windows; each chunk gets MFCC(13) over its audio
+    and mean VGG16 fc1+fc2(8192) over its face frames; both are StandardScaler-normalised
+    and scored by the ONNX; the session probability is the mean of per-chunk probabilities.
 
-    Returns:
-      {success, probability, prediction, prediction_label, risk_level, error}
+    Long clips are subsampled to `max_chunks` evenly-spaced windows to bound CPU cost.
+
+    Returns {success, probability, prediction, prediction_label, risk_level,
+             feature_source, chunks_used, positive_chunk_ratio, chunk_timeline, error}.
     """
     result: Dict[str, Any] = {
         "success": False,
@@ -701,21 +825,11 @@ def predict_cv_audio(
     }
 
     try:
-        onnx_path = _find_onnx_model_path(model_path)
-        sess = _get_onnx_session(onnx_path)
+        sess = _get_onnx_session(_find_onnx_model_path(model_path))
+        inp_name = sess.get_inputs()[0].name
 
-        audio_feat = _extract_audio_mfcc(video_path, n_mfcc=n_mfcc)  # (n_mfcc,)
-        video_feat, used_vgg = _extract_video_vgg_features(
-            video_path,
-            sample_rate_fps=sample_rate,
-            use_vgg=bool(use_vgg),
-            allow_fallback=bool(allow_fallback),
-        )  # (8192,)
-
-        # Apply the training-time StandardScalers. Mandatory for a meaningful probability:
-        # the ONNX was fit on scaled features. Scaling is applied only to genuine VGG16
-        # features; a fallback descriptor is left unscaled and flagged as unreliable.
-        if apply_scalers and used_vgg:
+        scaler_audio = scaler_video = None
+        if apply_scalers:
             scaler_audio, scaler_video = _load_scalers()
             if scaler_audio is None or scaler_video is None:
                 raise RuntimeError(
@@ -723,43 +837,89 @@ def predict_cv_audio(
                     "(13 dims) and models/cv_audio/scaler_video.pkl (8192 dims). Without them "
                     "the ONNX receives unscaled features and collapses to ~0."
                 )
-            audio_feat = scaler_audio.transform(
-                np.asarray(audio_feat, dtype=np.float32).reshape(1, -1)
-            )[0].astype(np.float32)
-            video_feat = scaler_video.transform(
-                np.asarray(video_feat, dtype=np.float32).reshape(1, -1)
-            )[0].astype(np.float32)
 
-        x_vec = np.concatenate([audio_feat, video_feat], axis=0).astype(np.float32)
+        # VGG feature model (real features required; no silent fallback).
+        used_vgg = bool(use_vgg)
+        feat_model = None
+        preprocess_input = None
+        if used_vgg:
+            try:
+                _ensure_protobuf_runtime_compat()
+                from tensorflow.keras.applications.vgg16 import preprocess_input as _pp
+                preprocess_input = _pp
+                feat_model = _get_vgg16_feat_model()
+            except Exception as exc:
+                if not allow_fallback:
+                    raise RuntimeError(_VGG_UNAVAILABLE_MSG) from exc
+                used_vgg = False
+        if not used_vgg and not allow_fallback:
+            raise RuntimeError(_VGG_UNAVAILABLE_MSG)
 
-        # Validate input dimensionality if ONNX specifies it
-        try:
-            expected = sess.get_inputs()[0].shape
-            if isinstance(expected, (list, tuple)) and len(expected) == 2:
-                expected_dim = expected[1]
-                if isinstance(expected_dim, int) and expected_dim > 0 and x_vec.shape[0] != expected_dim:
-                    raise ValueError(
-                        f"ONNX model expects {expected_dim} features, but got {x_vec.shape[0]} "
-                        f"(audio={audio_feat.shape[0]}, video={video_feat.shape[0]})."
-                    )
-        except Exception:
-            # If shape is dynamic/unknown, skip strict check
-            pass
+        # Audio + chunk layout.
+        waveform, sr = _load_audio_waveform(video_path, sr=16000)
+        duration = (len(waveform) / float(sr)) if sr else 0.0
+        if duration <= 0:
+            raise ValueError("could not determine media duration / empty audio")
 
-        prob = _onnx_predict_proba(sess, x_vec)
-        pred = 1 if prob >= float(threshold) else 0
+        n_chunks = max(1, int(math.ceil(duration / chunk_sec)))
+        if n_chunks > max_chunks:
+            keep = {int(round(i)) for i in np.linspace(0, n_chunks - 1, max_chunks)}
+        else:
+            keep = set(range(n_chunks))
+
+        crops_by_chunk = (
+            _collect_chunk_face_crops(video_path, chunk_sec, keep, frames_per_chunk, faces_fps)
+            if used_vgg else {}
+        )
+
+        chunk_probs: list = []
+        timeline: list = []
+        for chunk in sorted(keep):
+            start_s = chunk * chunk_sec
+            end_s = min((chunk + 1) * chunk_sec, duration)
+            if end_s <= start_s:
+                continue
+
+            crops = crops_by_chunk.get(chunk, [])
+            if not crops:
+                continue  # no face in this window -> skip (graceful, like training)
+            batch = preprocess_input(np.stack(crops, axis=0).astype(np.float32))
+            f1, f2 = feat_model.predict(batch, verbose=0)
+            video_feat = np.concatenate([f1, f2], axis=1).mean(axis=0).astype(np.float32)
+
+            audio_feat = _mfcc_mean(waveform[int(start_s * sr):int(end_s * sr)], sr, n_mfcc=n_mfcc)
+            if audio_feat is None or audio_feat.shape[0] != n_mfcc:
+                continue
+
+            if apply_scalers:
+                audio_feat = np.clip(
+                    scaler_audio.transform(audio_feat.reshape(1, -1))[0], -_SCALED_CLIP, _SCALED_CLIP
+                ).astype(np.float32)
+                video_feat = np.clip(
+                    scaler_video.transform(video_feat.reshape(1, -1))[0], -_SCALED_CLIP, _SCALED_CLIP
+                ).astype(np.float32)
+
+            x_vec = np.concatenate([audio_feat, video_feat], axis=0).astype(np.float32)
+            p = _onnx_predict_proba(sess, x_vec)
+            chunk_probs.append(p)
+            timeline.append({"start": round(start_s, 2), "end": round(end_s, 2), "prob": round(p, 4)})
+
+        if not chunk_probs:
+            raise ValueError("no usable chunks (no faces detected or no audio segments)")
+
+        probs = np.asarray(chunk_probs, dtype=np.float64)
+        session_prob = float(probs.mean())
+        pred = 1 if session_prob >= float(threshold) else 0
 
         result["success"] = True
-        result["probability"] = float(prob)
+        result["probability"] = session_prob
         result["prediction"] = int(pred)
         result["prediction_label"] = "experimental" if pred == 1 else "control"
-        result["risk_level"] = "high" if prob >= 0.5 else "medium" if prob >= 0.4 else "low"
+        result["risk_level"] = "high" if session_prob >= 0.5 else "medium" if session_prob >= 0.4 else "low"
         result["feature_source"] = "vgg16" if used_vgg else "fallback_sobel"
-        if not used_vgg:
-            result["error"] = (
-                "unreliable: non-VGG fallback features, scalers not applied; "
-                "probability is not comparable to the trained model"
-            )
+        result["chunks_used"] = len(chunk_probs)
+        result["positive_chunk_ratio"] = float((probs >= 0.5).mean())
+        result["chunk_timeline"] = timeline
         return result
 
     except Exception as e:
