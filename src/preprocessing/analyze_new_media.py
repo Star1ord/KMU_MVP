@@ -40,6 +40,22 @@ def _risk_level(score: float) -> str:
     return "low"
 
 
+# Overall verdict is configured to NLP-only. 0.69 is the control/experimental
+# separating operating point found on the validation set; the deployed ensemble
+# threshold (and the NLP model's own 0.44) do not separate these groups because all
+# modalities are biased high. CV/cv_audio are still computed for per-model display
+# but excluded from the overall ensemble.
+NLP_DECISION_THRESHOLD = 0.69
+
+
+def _nlp_overall_risk_level(score: float) -> str:
+    if score >= NLP_DECISION_THRESHOLD:
+        return "high"
+    if score >= NLP_DECISION_THRESHOLD - 0.1:
+        return "medium"
+    return "low"
+
+
 def _append_error(result: Dict[str, Any], message: str) -> None:
     existing = result.get("error")
     if existing:
@@ -482,6 +498,8 @@ def _run_nlp_prediction(
     audio_model = model_package["audio_model"]
     meta_model = model_package["meta_model"]
     threshold = float(model_package["threshold"])
+    # NLP-only overall: use the control/experimental separating operating point.
+    threshold = NLP_DECISION_THRESHOLD
 
     x_tfidf = text_model["vectorizer"].transform([full_text])
     p_text = _predict_positive_probability(text_model["classifier"], x_tfidf)
@@ -506,7 +524,7 @@ def _run_nlp_prediction(
     result["success"] = True
     result["nlp_prediction"] = final_prediction
     result["nlp_risk_score"] = p_final
-    result["nlp_risk_level"] = "high" if p_final >= 0.5 else "medium" if p_final >= 0.4 else "low"
+    result["nlp_risk_level"] = _nlp_overall_risk_level(p_final)
     result["nlp_prediction_label"] = "experimental" if final_prediction == 1 else "control"
     result["prediction"] = final_prediction
     result["risk_score"] = p_final
@@ -555,7 +573,7 @@ def _run_text_only_nlp_prediction(
             text_model["vectorizer"],
             text_model["classifier"],
         )
-    threshold = 0.5
+    threshold = NLP_DECISION_THRESHOLD
     prediction = int(p_text >= threshold)
 
     print("\n[Transcript-only NLP Fallback]")
@@ -567,7 +585,7 @@ def _run_text_only_nlp_prediction(
     result["success"] = True
     result["nlp_prediction"] = prediction
     result["nlp_risk_score"] = p_text
-    result["nlp_risk_level"] = "high" if p_text >= 0.5 else "medium" if p_text >= 0.4 else "low"
+    result["nlp_risk_level"] = _nlp_overall_risk_level(p_text)
     result["nlp_prediction_label"] = "experimental" if prediction == 1 else "control"
     result["prediction"] = prediction
     result["risk_score"] = p_text
@@ -671,26 +689,10 @@ def _build_available_results(result: Dict[str, Any]) -> list[Dict[str, Any]]:
             }
         )
 
-    video_result = result.get("video_result")
-    if video_result and video_result.get("success"):
-        available_results.append(
-            {
-                "name": "video",
-                "score": float(video_result["probability"]),
-                "prediction": int(video_result["prediction"]),
-            }
-        )
-
-    cv_audio_result = result.get("cv_audio_result")
-    if cv_audio_result and cv_audio_result.get("success"):
-        available_results.append(
-            {
-                "name": "cv_audio",
-                "score": float(cv_audio_result["probability"]),
-                "prediction": int(cv_audio_result["prediction"]),
-            }
-        )
-
+    # Ensemble is configured to NLP-only: the overall verdict uses the NLP score alone.
+    # CV and cv_audio are still computed and returned per-model for display, but are
+    # intentionally excluded from the overall ensemble (they are biased high and do not
+    # separate control from experimental; see NLP_DECISION_THRESHOLD).
     return available_results
 
 
@@ -708,7 +710,7 @@ def _build_ensemble_result(available_results: list[Dict[str, Any]]) -> Dict[str,
             "individual_scores": {item["name"]: float(item["score"])},
             "individual_predictions": {item["name"]: int(item["prediction"])},
             "agreement": True,
-            "risk_level": _risk_level(float(item["score"])),
+            "risk_level": _nlp_overall_risk_level(float(item["score"])),
         }
 
     scores = [float(item["score"]) for item in available_results]

@@ -297,6 +297,12 @@ async def predict(
     Upload a video file, run full preprocessing + NLP (and optional CV) models,
     and return the formatted result structure.
     """
+    # Ensemble is configured to NLP-only: the overall verdict comes from the NLP model
+    # alone, so CV/cv_audio are not executed here (keeps the cached demo fast). The
+    # query flags are overridden on the server; the UI is unchanged.
+    include_cv = False
+    include_cv_audio = False
+
     if file is not None:
         logger.info("/predict received multipart upload: %s", file.filename)
         result = await _analyze_uploaded_video(
